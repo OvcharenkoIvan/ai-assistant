@@ -60,3 +60,10 @@ def reset_notes(user_id):
         save_data(data)
         return True
     return False
+def search_notes(user_id, keyword):
+    """
+    Ищет заметки пользователя по ключевому слову (регистр игнорируется)
+    """
+    keyword = keyword.lower()
+    notes = get_notes(user_id)
+    return [note for note in notes if keyword in note.lower()]
