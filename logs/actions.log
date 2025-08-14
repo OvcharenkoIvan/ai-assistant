@@ -2507,3 +2507,32 @@ telegram.error.NetworkError: httpx.ConnectError: [Errno 11001] getaddrinfo faile
 2025-08-13 21:43:24,233 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
 2025-08-13 21:43:24,234 - INFO - Application is stopping. This might take a moment.
 2025-08-13 21:43:24,235 - INFO - Application.stop() complete
+2025-08-14 10:21:19,594 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/setMyCommands "HTTP/1.1 200 OK"
+2025-08-14 10:21:19,596 - INFO - 🤖 Бот запущен...
+2025-08-14 10:21:19,662 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getMe "HTTP/1.1 200 OK"
+2025-08-14 10:21:19,702 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/deleteWebhook "HTTP/1.1 200 OK"
+2025-08-14 10:21:19,705 - INFO - Application started
+2025-08-14 10:21:29,828 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:21:39,873 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:21:49,916 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:21:59,957 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:09,999 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:12,121 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:14,768 - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-08-14 10:22:14,776 - INFO - GPT ответил пользователю 423368779 на запрос: Экономический кризис в 2025/2026 году будет?
+2025-08-14 10:22:14,949 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/sendMessage "HTTP/1.1 200 OK"
+2025-08-14 10:22:24,824 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:34,865 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:44,916 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:22:54,954 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:05,002 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:15,044 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:25,073 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:35,128 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:45,172 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:23:55,199 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:24:05,248 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:24:15,291 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:24:25,332 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
+2025-08-14 10:24:35,378 - INFO - Application is stopping. This might take a moment.
+2025-08-14 10:24:35,379 - INFO - Application.stop() complete
