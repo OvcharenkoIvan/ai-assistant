@@ -1,54 +1,52 @@
-import os
-import logging
-from pathlib import Path
 from telegram import Update
 from telegram.ext import ContextTypes
 from openai import OpenAI
-from bot.core import storage
+import logging
+
 from bot.core.logger import log_action
-from dotenv import load_dotenv
-
-# --- Корень проекта для dotenv и sys.path ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-if not OPENAI_API_KEY:
-    logging.warning("⚠️ OPENAI_API_KEY не найден! GPT не будет работать.")
-
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-SYSTEM_PROMPT = (
-    "Ты — Spudnyk, персональный ассистент Ивана. "
-    "Отвечай кратко, по делу, дружелюбно. "
-    "Если пользователь просит — давай расширенные инструкции. "
-    "Всегда помни, что ты — AI-помощник для Иванa Овчаренко. "
-    "Говори только правду, не выдумывай факты. "
-    "Ты полноценный помощник, который всеми путями хочет искренне помочь."
+from bot.core.config import (
+    SYSTEM_PROMPT,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OPENAI_TEMPERATURE,
+    OPENAI_MAX_TOKENS,
 )
 
-async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if client is None:
-        await update.message.reply_text("⚠️ GPT не настроен.")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+if client is None:
+    logging.warning("⚠️ OPENAI_API_KEY не найден — GPT-ответы будут отключены.")
+
+async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Проверяем, что это текстовое сообщение
+    if not update.message or not update.message.text:
         return
+
+    # Игнорируем команды (начинаются с /)
+    if update.message.text.startswith("/"):
+        return
+
     user_id = update.effective_user.id
-    text = (update.message.text or "").strip()
-    if not text: return
+    text = update.message.text.strip()
+    logging.info(f"Получено сообщение от {user_id}: {text}")
+
+    if client is None:
+        await update.message.reply_text("⚠️ GPT не настроен (нет ключа API).")
+        return
+
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
+                {"role": "user", "content": text},
             ],
-            temperature=0.7,
-            max_tokens=700
+            temperature=OPENAI_TEMPERATURE,
+            max_tokens=OPENAI_MAX_TOKENS,
         )
-        bot_reply = resp.choices[0].message.content
-        log_action(f"GPT ответ пользователю {user_id} на: {text}")
-        await update.message.reply_text(bot_reply)
+        reply = resp.choices[0].message.content
+        log_action(f"GPT ответ пользователю {user_id}: {text[:120]!r}")
+        await update.message.reply_text(reply)
+
     except Exception as e:
         logging.exception("Ошибка GPT")
         await update.message.reply_text(f"⚠️ Ошибка GPT: {e}")

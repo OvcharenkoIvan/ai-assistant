@@ -2,6 +2,9 @@ import os
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# Добавляем хендлер для GPT после всех CommandHandler
+app.add_handler(MessageHandler(filters.TEXT, chat_with_gpt))
+
 # Загрузка переменных окружения из файла .env
 load_dotenv()
 

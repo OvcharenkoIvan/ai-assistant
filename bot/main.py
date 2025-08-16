@@ -1,34 +1,35 @@
+# bot/main.py
 import sys
 import asyncio
-import os
 import logging
 from pathlib import Path
-from dotenv import load_dotenv
 from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
-# --- Корень проекта для sys.path и dotenv ---
+# --- Корень проекта для sys.path ---
 ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.append(str(ROOT_DIR))  # теперь видно папку core
+sys.path.append(str(ROOT_DIR))
 
-load_dotenv(ROOT_DIR / ".env")  # загружаем переменные окружения
+# --- Импорты конфигурации и модулей ---
+from bot.core.config import TELEGRAM_TOKEN
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("❌ TELEGRAM_BOT_TOKEN не найден")
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("❌ TELEGRAM_TOKEN не найден")
 
-# --- Импорты команд и GPT ---
 from bot.commands.start_help import start, help_command
 from bot.commands.notes import note, notes, reset, search
 from bot.gpt.chat import chat_with_gpt
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 async def main():
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     # --- Команды бота ---
     await app.bot.set_my_commands([
@@ -48,11 +49,12 @@ async def main():
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("search", search))
 
-    # --- Хендлер для GPT на все текстовые сообщения, кроме команд ---
-    app.add_handler(MessageHandler(~filters.COMMAND, chat_with_gpt))
+    # --- Хендлер для GPT на все текстовые сообщения (кроме команд) ---
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_with_gpt))
 
-    logging.info("🤖 Бот запущен...")
-    await app.run_polling(close_loop=False, drop_pending_updates=True)
+    logging.info("🤖 Бот запущен и готов к работе...")
+    await app.run_polling(drop_pending_updates=True, close_loop=False)
+
 
 if __name__ == "__main__":
     import nest_asyncio
@@ -66,4 +68,3 @@ if __name__ == "__main__":
             loop.run_forever()
         else:
             raise
-
