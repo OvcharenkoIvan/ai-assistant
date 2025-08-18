@@ -3661,3 +3661,13 @@ telegram.error.NetworkError: httpx.ConnectError: [Errno 11001] getaddrinfo faile
 2025-08-16 21:22:22,446 - INFO - HTTP Request: POST https://api.telegram.org/bot8295297553:AAEJcMSjez2HuDsD2x-bmokSgomsw7qd4J8/getUpdates "HTTP/1.1 200 OK"
 2025-08-16 21:22:29,570 - INFO - Application is stopping. This might take a moment.
 2025-08-16 21:22:29,570 - INFO - Application.stop() complete
+2025-08-18 21:24:44,774 - INFO - 🤖 Бот запущен: @Spudnyk_bot (id=8295297553)
+2025-08-18 21:24:45,052 - INFO - Application started
+2025-08-18 21:25:11,784 - INFO - User 423368779 запустил /start
+2025-08-18 21:25:14,154 - INFO - User 423368779 запустил /start
+2025-08-18 21:25:27,008 - INFO - [voice] Ivan_Ovcharenko -> сохранён 20250818_212526_input.ogg
+2025-08-18 21:25:39,179 - INFO - [voice->text] Ivan_Ovcharenko: Ты тут? Можно с тобой работать?
+2025-08-18 21:28:05,448 - INFO - [voice] Ivan_Ovcharenko -> сохранён 20250818_212805_input.ogg
+2025-08-18 21:28:07,190 - INFO - [voice->text] Ivan_Ovcharenko: Какая сегодня погода в Польше?
+2025-08-18 21:31:17,316 - INFO - Application is stopping. This might take a moment.
+2025-08-18 21:31:17,316 - INFO - Application.stop() complete
