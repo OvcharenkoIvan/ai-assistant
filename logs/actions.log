@@ -3671,3 +3671,10 @@ telegram.error.NetworkError: httpx.ConnectError: [Errno 11001] getaddrinfo faile
 2025-08-18 21:28:07,190 - INFO - [voice->text] Ivan_Ovcharenko: Какая сегодня погода в Польше?
 2025-08-18 21:31:17,316 - INFO - Application is stopping. This might take a moment.
 2025-08-18 21:31:17,316 - INFO - Application.stop() complete
+2025-08-20 11:06:39,258 - INFO - 🤖 Бот запущен: @Spudnyk_bot (id=8295297553)
+2025-08-20 11:06:39,355 - INFO - Application started
+2025-08-20 11:40:59,170 - INFO - User 423368779 включил голосовой режим.
+2025-08-20 11:41:10,833 - INFO - [voice] Ivan_Ovcharenko -> сохранён 20250820_114110_input.ogg
+2025-08-20 11:41:15,332 - INFO - [voice->text] Ivan_Ovcharenko: Расскажи кто ты, что ты, что умеешь
+2025-08-20 11:55:40,619 - INFO - Application is stopping. This might take a moment.
+2025-08-20 11:55:40,619 - INFO - Application.stop() complete

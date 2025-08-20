@@ -16,6 +16,9 @@ from telegram.ext import (
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
+# --- Owner ID ---
+OWNER_ID = 423368779 # ID владельца бота (для админских команд)
+
 # --- Импорты конфигурации и модулей ---
 from bot.core.config import TELEGRAM_TOKEN
 
@@ -24,17 +27,13 @@ if not TELEGRAM_TOKEN:
 
 # --- Импорты команд ---
 from bot.commands.start_help import start, help_command
-# from bot.commands.notes import note, notes, reset, search  # Временно отключено
 
 from bot.commands.voice import (
     voice_on,
     voice_off,
     voice_status,
-    answer_voice,
-    ответь_аудио,
-    voice_inline,
-    voice_button_handler,
-)
+    voice_persistent_keyboard,
+)  
 
 # --- Обработчики сообщений ---
 from bot.gpt.chat import chat_with_gpt          # текст → GPT
@@ -64,34 +63,26 @@ async def main():
             BotCommand("voice_on", "Включить голосовые ответы"),
             BotCommand("voice_off", "Выключить голосовые ответы"),
             BotCommand("voice_status", "Проверить статус голосового режима"),
-            BotCommand("answer_voice", "Следующий ответ будет в голосе"),
-            BotCommand("reply_audio", "Следующий ответ будет в голосе (рус.)"),  # латиница в command
-            BotCommand("voice_inline", "Открыть кнопки управления голосом"),
+            BotCommand("keyboard", "Открыть клавиатуру управления"),
         ]
     )
+    
 
     # --- Хендлеры команд ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    # app.add_handler(CommandHandler("note", note))     # временно отключено
-    # app.add_handler(CommandHandler("notes", notes))   # временно отключено
-    # app.add_handler(CommandHandler("reset", reset))   # временно отключено
-    # app.add_handler(CommandHandler("search", search)) # временно отключено
+    app.add_handler(CommandHandler("keyboard", voice_persistent_keyboard))
+
 
     # --- Голосовые команды ---
     app.add_handler(CommandHandler("voice_on", voice_on))
     app.add_handler(CommandHandler("voice_off", voice_off))
     app.add_handler(CommandHandler("voice_status", voice_status))
-    app.add_handler(CommandHandler("answer_voice", answer_voice))
-    app.add_handler(CommandHandler("reply_audio", ответь_аудио))
 
-    # --- Inline-кнопки ---
-    app.add_handler(CommandHandler("voice_inline", voice_inline))
-    app.add_handler(
-        CallbackQueryHandler(
-            voice_button_handler, pattern=r"^(voice_on|voice_off|next_voice)$"
-        )
-    )
+    
+    # Обработка кнопок (они прилетают как обычные сообщения)
+    app.add_handler(MessageHandler(filters.Regex("^🔊 Включить голос$"), voice_on))
+    app.add_handler(MessageHandler(filters.Regex("^🔇 Выключить голос$"), voice_off))
 
     # --- Голосовые сообщения ---
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
@@ -102,9 +93,18 @@ async def main():
     # Лог информации о боте
     me = await app.bot.get_me()
     logging.info(f"🤖 Бот запущен: @{me.username} (id={me.id})")
+    from bot.commands.voice import voice_persistent_keyboard
 
-    await app.run_polling(drop_pending_updates=True, close_loop=False)
-
+# Отправляем клавиатуру владельцу при старте
+try:
+    await voice_persistent_keyboard(
+        update=None,
+        context=type("obj", (object,), {"bot": app.bot, "user_data": {}, "chat_data": {}, "args": [], "update_queue": None, "job_queue": None, "application": app, "update": None, "chat_id": OWNER_ID})()
+    )
+    logging.info(f"📲 Клавиатура отправлена пользователю {OWNER_ID}")
+except Exception as e:
+    logging.error(f"❌ Не удалось отправить клавиатуру: {e}")
+    logging.info("Бот готов к работе!")
 
 if __name__ == "__main__":
     import nest_asyncio
