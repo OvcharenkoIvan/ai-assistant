@@ -12,6 +12,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("❌ TELEGRAM_BOT_TOKEN не найден в .env")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")    
+AUTO_WEB = int(os.getenv("AUTO_WEB", 1)) 
+SEARCH_LOCALE = os.getenv("SEARCH_LOCALE", "ru") 
+SEARCH_COUNTRY = os.getenv("SEARCH_COUNTRY", "US")
 
 # --- Директории ---
 DATA_DIR = PROJECT_ROOT / "data"

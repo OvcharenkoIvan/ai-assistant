@@ -39,3 +39,4 @@ zstandard==0.23.0
 gTTS
 pydub
 SpeechRecognition
+aiohttp

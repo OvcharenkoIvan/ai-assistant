@@ -9,23 +9,22 @@ from bot.core.config import (
     OPENAI_MODEL,
     OPENAI_TEMPERATURE,
     OPENAI_MAX_TOKENS,
+    AUTO_WEB,
+    SEARCH_LOCALE,
+    SEARCH_COUNTRY,
 )
 from bot.gpt.prompt import SYSTEM_PROMPT
 from bot.voice.state import should_send_voice_now
-from bot.voice.tts import synthesize_and_send_voice  # единая точка для TTS
+from bot.voice.tts import synthesize_and_send_voice
+from bot.search.web import web_search, render_results_for_prompt
+from bot.gpt.translate import translate_text
+
+logger = logging.getLogger(__name__)
 
 # --- Инициализация клиента OpenAI ---
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 if client is None:
-    logging.warning("⚠️ OPENAI_API_KEY не найден — GPT-ответы будут отключены.")
-
-
-# --- Строим список сообщений для GPT ---
-def build_messages(user_id: int, user_text: str):
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
+    logger.warning("⚠️ OPENAI_API_KEY не найден — GPT-ответы будут отключены.")
 
 
 # --- Запрос к GPT через OpenAI API ---
@@ -40,6 +39,18 @@ def ask_gpt(messages):
     )
     return resp.choices[0].message.content
 
+# --- Строим список сообщений для GPT с web-контекстом ---
+def build_messages(user_id: int, user_text: str, web_text: str = ""):
+    if web_text:
+        user_content = f"Используй актуальную информацию из интернета:\n{web_text}\n\nВопрос пользователя:\n{user_text}"
+    else:
+        user_content = user_text
+
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
 
 # --- Обёртка для Telegram ---
 async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -50,27 +61,43 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     user_id = update.effective_user.id
     text = update.message.text.strip()
-    logging.info(f"Получено сообщение от {user_id}: {text}")
+    logger.info(f"Получено сообщение от {user_id}: {text!r}")
 
     if client is None:
         await update.message.reply_text("⚠️ GPT не настроен (нет ключа API).")
         return
 
-    try:
-        messages = build_messages(user_id, text)
-        reply = ask_gpt(messages)
-        logging.info(f"GPT ответ пользователю {user_id}: {reply[:120]!r}")
+    web_text = ""
+    # --- Авто-поиск в интернете ---
+    if AUTO_WEB:
+        try:
+            results = web_search(
+                query=text,
+                max_results=5,
+                lang=SEARCH_LOCALE,
+                country=SEARCH_COUNTRY,
+            )
+            if results:
+                web_text = render_results_for_prompt(results)
+                web_text = await translate_text(web_text, target_language="Russian")
+        except Exception as e:
+            logger.warning(f"Web search failed: {e}")
 
-        # Всегда отправляем текст
+    try:
+        messages = build_messages(user_id, text, web_text)
+        reply = ask_gpt(messages)
+        logger.info(f"GPT ответ пользователю {user_id}: {reply[:120]!r}")
+
+        # Отправляем текст
         await update.message.reply_text(reply)
 
-        # Если голос включён глобально или разово → отправляем TTS
+        # Отправка TTS, если включено
         if should_send_voice_now(user_id):
             try:
                 await synthesize_and_send_voice(update, reply)
             except Exception:
-                logging.exception("Ошибка TTS при ответе на текстовое сообщение")
+                logger.exception("Ошибка TTS при ответе на текстовое сообщение")
 
     except Exception as e:
-        logging.exception("Ошибка GPT")
+        logger.exception("Ошибка GPT")
         await update.message.reply_text(f"⚠️ Ошибка GPT: {e}")

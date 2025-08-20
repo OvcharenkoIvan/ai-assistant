@@ -3,7 +3,7 @@ import sys
 import asyncio
 import logging
 from pathlib import Path
-from telegram import BotCommand
+from telegram import BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -32,7 +32,6 @@ from bot.commands.voice import (
     voice_on,
     voice_off,
     voice_status,
-    voice_persistent_keyboard,
 )  
 
 # --- Обработчики сообщений ---
@@ -47,6 +46,14 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
+# Клавиатура для голосового режима
+voice_keyboard = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("🔊 Включить голос"), KeyboardButton("🔇 Выключить голос")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False  # <- клавиатура не исчезает после нажатия
+)
 
 async def main():
     # Windows: корректная политика цикла событий
@@ -71,7 +78,6 @@ async def main():
     # --- Хендлеры команд ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("keyboard", voice_persistent_keyboard))
 
 
     # --- Голосовые команды ---
@@ -93,18 +99,22 @@ async def main():
     # Лог информации о боте
     me = await app.bot.get_me()
     logging.info(f"🤖 Бот запущен: @{me.username} (id={me.id})")
-    from bot.commands.voice import voice_persistent_keyboard
 
-# Отправляем клавиатуру владельцу при старте
-try:
-    await voice_persistent_keyboard(
-        update=None,
-        context=type("obj", (object,), {"bot": app.bot, "user_data": {}, "chat_data": {}, "args": [], "update_queue": None, "job_queue": None, "application": app, "update": None, "chat_id": OWNER_ID})()
-    )
-    logging.info(f"📲 Клавиатура отправлена пользователю {OWNER_ID}")
-except Exception as e:
-    logging.error(f"❌ Не удалось отправить клавиатуру: {e}")
-    logging.info("Бот готов к работе!")
+# --- Отправляем клавиатуру владельцу при старте ---
+    try:
+        await app.bot.send_message(
+            chat_id=OWNER_ID,
+            text="Клавиатура для управления голосом активирована:",
+            reply_markup=voice_keyboard
+        )
+        logging.info(f"📲 Клавиатура отправлена пользователю {OWNER_ID}")
+    except Exception as e:
+        logging.error(f"❌ Не удалось отправить клавиатуру: {e}")
+        logging.info("Бот готов к работе!")
+        
+# --- Запуск бота на постоянное прослушивание ---
+    await app.run_polling()
+
 
 if __name__ == "__main__":
     import nest_asyncio
