@@ -51,6 +51,27 @@ def build_messages(user_id: int, user_text: str, web_text: str = ""):
         {"role": "user", "content": user_content},
     ]
 
+# --- Ключевые слова для web search ---
+WEB_KEYWORDS = [
+    "сейчас", "сегодня", "новости", "последние", "актуальные",
+    "кто", "кто руководит",
+    "какой день", "какая дата", "какой праздник",
+    "когда будет", "расписание",
+    "погода", "курс валют", "евро", "доллар", "биткоин", "акции",
+    "где находится", "адрес", "магазин", "ресторан", "кафе", "рядом",
+    "фильм", "сериал", "песня", "певец", "актёр", "актриса", "тур", "концерт",
+    "матч", "счёт", "турнир", "чемпионат", "лига", "результат"
+]
+
+def needs_web_search(user_text: str) -> bool:
+    text = user_text.lower()
+    for kw in WEB_KEYWORDS:
+        if kw in text:
+            return True
+    # эвристика: короткие вопросы с "?"
+    if len(text.split()) <= 5 and text.endswith("?"):
+        return True
+    return False
 
 # --- Обёртка для Telegram ---
 async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -68,8 +89,7 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     web_text = ""
-    # --- Авто-поиск в интернете ---
-    if AUTO_WEB:
+    if AUTO_WEB and needs_web_search(text):
         try:
             results = web_search(
                 query=text,
