@@ -40,3 +40,4 @@ gTTS
 pydub
 SpeechRecognition
 aiohttp
+aiogram

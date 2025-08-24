@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
+from bot.memory.memory_sqlite import init_db
 
 from telegram import BotCommand
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
@@ -49,6 +50,9 @@ async def main() -> None:
     # --- Для Windows корректный event loop ---
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Инициализируем SQLite для assistant
+    init_db()
 
     # --- Создание приложения ---
     app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
