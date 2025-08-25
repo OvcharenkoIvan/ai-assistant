@@ -1,39 +1,35 @@
-"""
-Интеграционный тест MVP:
-- SQLite-хранилище
-- Intent классификация
-- Smart Capture (inline-кнопки)
-
-Запуск:
-$ python bot/tests/test_mvp.py
-"""
-
+# bot/tests/test_mvp.py
 import sys
 from pathlib import Path
 import asyncio
 import logging
 from types import SimpleNamespace
-import os
 
-# --- Добавляем корень проекта ---
+# --- Добавляем корень проекта в sys.path ---
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(ROOT_DIR))
 
-# --- Логирование ---
-logging.basicConfig(level=logging.INFO)
-
-# --- Импорты проекта ---
-from bot.memory.memory_sqlite import init_db, add_task, add_note, get_tasks, get_notes
+# --- Импорты наших модулей ---
+from bot.memory.memory_sqlite import init_db, add_task, add_note, list_tasks, list_notes
 from bot.memory.intent import classify_intent, process_intent
 from bot.memory.capture import offer_capture, handle_capture_callback
 
-# --- Очистка базы перед тестом ---
-DB_PATH = ROOT_DIR / "memory.db"
-if DB_PATH.exists():
-    DB_PATH.unlink()
-    logging.info("Старая база удалена ✅")
+logging.basicConfig(level=logging.INFO)
 
-# --- Фейковые объекты для теста ---
+# --- Заглушка для ask_gpt ---
+# В тестах GPT нам не нужен, поэтому возвращаем сразу "task" или "note"
+import bot.memory.intent as intent_module
+async def fake_ask_gpt(prompt: str, system: str = None) -> str:
+    # Для теста можно вернуть "task" или "note" в зависимости от текста
+    if "задача" in prompt.lower() or "сделать" in prompt.lower():
+        return "task"
+    elif "заметка" in prompt.lower() or "идея" in prompt.lower():
+        return "note"
+    return "none"
+
+intent_module.ask_gpt = fake_ask_gpt  # <- подключаем заглушку
+
+# --- Fake объекты для теста ---
 class FakeMessage:
     def __init__(self, text, user_id=123):
         self.text = text
@@ -48,10 +44,10 @@ class FakeCallback:
         self.data = data
         self.from_user = SimpleNamespace(id=user_id)
         self.message = FakeMessage("Original message")
-    async def answer(self, show_alert=False):
-        print(f"[Callback answer] show_alert={show_alert}")
+    async def answer(self, text: str = None, show_alert: bool = False):
+        print(f"[Callback answer] text={text} show_alert={show_alert}")
 
-# --- Основной тест ---
+# --- Главная функция теста ---
 async def run_tests():
     print("=== Тестирование SQLite-хранилища MVP ===")
     init_db()
@@ -65,26 +61,27 @@ async def run_tests():
     ]
 
     for text in test_texts:
-        intent = classify_intent(text)
+        intent = await classify_intent(text)  # <- обязательно await для async функции
         print(f"Text: '{text}' -> Intent: {intent}")
 
+        # Если задача или заметка, вызываем offer_capture
         msg = FakeMessage(text)
         if intent in ("task", "note"):
             await offer_capture(msg)
 
-    # --- Тест callback сохранения ---
+    # --- Тест сохранения через callback ---
     print("\n=== Тест callback сохранения ===")
     task_cb = FakeCallback("capture:task:Сделать отчёт")
     note_cb = FakeCallback("capture:note:Идея для заметки")
     await handle_capture_callback(task_cb)
     await handle_capture_callback(note_cb)
 
-    # --- Проверка данных в базе ---
-    tasks = get_tasks()
-    notes = get_notes()
-    print("\n--- Данные в БД ---")
-    print(f"Tasks: {tasks}")
-    print(f"Notes: {notes}")
+    # --- Проверяем данные в БД ---
+    tasks = list_tasks()
+    notes = list_notes()
+    print("\nTasks in DB:", tasks)
+    print("Notes in DB:", notes)
 
+# --- Запуск теста ---
 if __name__ == "__main__":
     asyncio.run(run_tests())
