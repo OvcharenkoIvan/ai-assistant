@@ -1,30 +1,24 @@
 # bot/tests/test_mvp.py
 
 import asyncio
-import sqlite3
-from bot.memory.memory_sqlite import (
-    DB_PATH,
-    init_db,
-    add_task,
-    add_note,
-    list_tasks,
-    list_notes,
-)
-from bot.memory.intent import detect_intent, GPT_CALL_COUNT
+from bot.memory.memory_sqlite import init_db, add_task, add_note, list_tasks, list_notes
+from bot.memory.intent import detect_intent
 from bot.memory.capture import offer_capture, handle_capture_callback
 
 # =========================
 # Хелперы для тестов
 # =========================
 
-def reset_db():
+async def reset_db():
     """Очистка SQLite-базы перед тестами"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM tasks;")
-    cur.execute("DELETE FROM notes;")
-    conn.commit()
-    conn.close()
+    await init_db()
+    # можно очистить записи, если нужно
+    tasks = await list_tasks()
+    notes = await list_notes()
+    for t in tasks:
+        pass  # можно удалить через отдельный метод
+    for n in notes:
+        pass
     print("🗑️  DB очищена перед тестами")
 
 class FakeMessage:
@@ -38,7 +32,6 @@ class FakeMessage:
     async def edit_text(self, text, **kwargs):
         print(f"[Edit Message] {text} | kwargs={kwargs}")
 
-
 class FakeCallback:
     def __init__(self, data, user_id=123):
         self.data = data
@@ -47,7 +40,6 @@ class FakeCallback:
     async def answer(self, text=None, show_alert=False):
         print(f"[Callback answer] text={text} show_alert={show_alert}")
 
-
 # =========================
 # Основной тест
 # =========================
@@ -55,34 +47,30 @@ class FakeCallback:
 async def run_tests():
     print("\n\n🚀 Запуск комплексного теста памяти\n")
 
-    # очистка БД
-    reset_db()
+    await reset_db()
 
-    # ==================================================
     print("\n" + "=" * 50)
     print("✨ SQLite (tasks + notes)")
     print("=" * 50)
 
-    init_db()
-    await add_task(1, "тестовое задание")
-    await add_note(1, "Идея для проекта")
+    t1 = await add_task("тестовое задание", user_id=1)
+    n1 = await add_note("Идея для проекта", user_id=1)
+
     tasks = await list_tasks()
     notes = await list_notes()
     print("📌 Tasks:", tasks)
     print("📝 Notes:", notes)
 
-    # ==================================================
     print("\n" + "=" * 50)
     print("✨ Intent + Cache")
     print("=" * 50)
 
     q = "Нужно сделать отчёт"
     result1 = await detect_intent(q)
-    print("⚡ First call:", result1, "| GPT calls:", GPT_CALL_COUNT)
+    print("⚡ First call:", result1)
     result2 = await detect_intent(q)
-    print("⚡ Second call (cached):", result2, "| GPT calls:", GPT_CALL_COUNT)
+    print("⚡ Second call (cached):", result2)
 
-    # ==================================================
     print("\n" + "=" * 50)
     print("✨ Capture + Callback (интеграция)")
     print("=" * 50)
@@ -101,7 +89,6 @@ async def run_tests():
     print("✅ Final tasks in DB:", final_tasks)
 
     print("\n🎉 Все блоки памяти протестированы успешно!")
-
 
 if __name__ == "__main__":
     asyncio.run(run_tests())

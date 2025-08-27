@@ -3,12 +3,13 @@ import sys
 import asyncio
 import logging
 from pathlib import Path
-from telegram import BotCommand, ReplyKeyboardMarkup, KeyboardButton
+from telegram import BotCommand, ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ContextTypes,
     filters,
 )
 from bot.memory.capture import handle_capture_callback
@@ -94,12 +95,11 @@ async def main():
     app.add_handler(CallbackQueryHandler(handle_capture_callback, pattern=r"^capture:"))
 
     # --- Текстовые сообщения: GPT + Smart Capture ---
-    async def text_handler(update, context):
-        message = update.message
-        if not message or not message.text:
+    async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.message or not update.message.text:
             return
-        # 1. Обработка Smart Capture
-        await process_intent(message)
+        # 1. Обработка Smart Capture (Intent)
+        await process_intent(update.message)
         # 2. Обработка GPT
         await chat_with_gpt(update, context)
 
@@ -127,3 +127,5 @@ if __name__ == "__main__":
             loop.run_forever()
         else:
             raise
+# bot/memory/intent.py
+import re
