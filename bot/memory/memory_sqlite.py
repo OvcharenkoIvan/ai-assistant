@@ -1,23 +1,23 @@
 # bot/memory/memory_sqlite.py
 """
-SQLite-хранилище для ассистента.
-Содержит: init_db, add_task, add_note, list_tasks, list_notes, get_task, get_note,
+SQLite-хранилище для ассистента с поддержкой ENV-пути.
+CRUD: init_db, add_task, add_note, list_tasks, list_notes, get_task, get_note,
 update_task_status, delete_task, delete_note, get_tasks, get_notes.
 """
 
 from __future__ import annotations
-
 import sqlite3
 import time
 import logging
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "assistant.db"
+# Путь к базе: ENV DB_PATH или fallback на project/data/assistant.db
+_DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).resolve().parents[2] / "data" / "assistant.db"))
 _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
 
 def _connect() -> sqlite3.Connection:
     con = sqlite3.connect(str(_DB_PATH), timeout=30, detect_types=sqlite3.PARSE_DECLTYPES)
@@ -25,7 +25,6 @@ def _connect() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
     return con
-
 
 def init_db() -> None:
     con = _connect()
@@ -52,7 +51,7 @@ def init_db() -> None:
     con.close()
     logger.info("SQLite: init_db completed (%s)", _DB_PATH)
 
-
+# --- Tasks ---
 def add_task(text: str, user_id: Optional[int] = None, due_at: Optional[int] = None) -> int:
     ts = int(time.time())
     con = _connect()
@@ -65,21 +64,6 @@ def add_task(text: str, user_id: Optional[int] = None, due_at: Optional[int] = N
     con.close()
     logger.debug("add_task -> id=%s user_id=%s", task_id, user_id)
     return task_id
-
-
-def add_note(text: str, user_id: Optional[int] = None) -> int:
-    ts = int(time.time())
-    con = _connect()
-    with con:
-        cur = con.execute(
-            "INSERT INTO notes (user_id, text, created_at) VALUES (?, ?, ?)",
-            (user_id, text, ts),
-        )
-        note_id = cur.lastrowid
-    con.close()
-    logger.debug("add_note -> id=%s user_id=%s", note_id, user_id)
-    return note_id
-
 
 def list_tasks(user_id: Optional[int] = None, status: Optional[str] = None,
                limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -105,6 +89,52 @@ def list_tasks(user_id: Optional[int] = None, status: Optional[str] = None,
     finally:
         con.close()
 
+def get_task(task_id: int) -> Optional[Dict[str, Any]]:
+    con = _connect()
+    try:
+        cur = con.execute(
+            "SELECT id, user_id, text, due_at, status, created_at FROM tasks WHERE id = ?",
+            (task_id,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+def update_task_status(task_id: int, status: str) -> bool:
+    con = _connect()
+    with con:
+        cur = con.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        updated = cur.rowcount > 0
+    con.close()
+    logger.debug("update_task_status id=%s status=%s updated=%s", task_id, status, updated)
+    return updated
+
+def delete_task(task_id: int) -> bool:
+    con = _connect()
+    with con:
+        cur = con.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        deleted = cur.rowcount > 0
+    con.close()
+    logger.debug("delete_task id=%s deleted=%s", task_id, deleted)
+    return deleted
+
+def get_tasks() -> List[Dict[str, Any]]:
+    return list_tasks(limit=None)
+
+# --- Notes ---
+def add_note(text: str, user_id: Optional[int] = None) -> int:
+    ts = int(time.time())
+    con = _connect()
+    with con:
+        cur = con.execute(
+            "INSERT INTO notes (user_id, text, created_at) VALUES (?, ?, ?)",
+            (user_id, text, ts),
+        )
+        note_id = cur.lastrowid
+    con.close()
+    logger.debug("add_note -> id=%s user_id=%s", note_id, user_id)
+    return note_id
 
 def list_notes(user_id: Optional[int] = None, limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
     con = _connect()
@@ -126,63 +156,14 @@ def list_notes(user_id: Optional[int] = None, limit: Optional[int] = 100, offset
     finally:
         con.close()
 
-
-# --- Новые функции для тестов и простого получения всех записей ---
-def get_tasks() -> List[Dict[str, Any]]:
-    """Возвращает все задачи без фильтров."""
-    return list_tasks(limit=None)
-
-
-def get_notes() -> List[Dict[str, Any]]:
-    """Возвращает все заметки без фильтров."""
-    return list_notes(limit=None)
-
-
-def get_task(task_id: int) -> Optional[Dict[str, Any]]:
-    con = _connect()
-    try:
-        cur = con.execute(
-            "SELECT id, user_id, text, due_at, status, created_at FROM tasks WHERE id = ?",
-            (task_id,)
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
-    finally:
-        con.close()
-
-
 def get_note(note_id: int) -> Optional[Dict[str, Any]]:
     con = _connect()
     try:
-        cur = con.execute(
-            "SELECT id, user_id, text, created_at FROM notes WHERE id = ?",
-            (note_id,)
-        )
+        cur = con.execute("SELECT id, user_id, text, created_at FROM notes WHERE id = ?", (note_id,))
         row = cur.fetchone()
         return dict(row) if row else None
     finally:
         con.close()
-
-
-def update_task_status(task_id: int, status: str) -> bool:
-    con = _connect()
-    with con:
-        cur = con.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
-        updated = cur.rowcount > 0
-    con.close()
-    logger.debug("update_task_status id=%s status=%s updated=%s", task_id, status, updated)
-    return updated
-
-
-def delete_task(task_id: int) -> bool:
-    con = _connect()
-    with con:
-        cur = con.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        deleted = cur.rowcount > 0
-    con.close()
-    logger.debug("delete_task id=%s deleted=%s", task_id, deleted)
-    return deleted
-
 
 def delete_note(note_id: int) -> bool:
     con = _connect()
@@ -193,11 +174,13 @@ def delete_note(note_id: int) -> bool:
     logger.debug("delete_note id=%s deleted=%s", note_id, deleted)
     return deleted
 
+def get_notes() -> List[Dict[str, Any]]:
+    return list_notes(limit=None)
 
+# --- Тестовый запуск ---
 if __name__ == "__main__":
     import logging as _logging
     _logging.basicConfig(level=_logging.DEBUG)
-
     init_db()
     print("DB initialized at:", _DB_PATH)
     t = add_task("Тестовая задача из memory_sqlite.py")

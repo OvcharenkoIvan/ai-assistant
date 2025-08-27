@@ -1,87 +1,107 @@
 # bot/tests/test_mvp.py
-import sys
-from pathlib import Path
+
 import asyncio
-import logging
-from types import SimpleNamespace
-
-# --- Добавляем корень проекта в sys.path ---
-ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-sys.path.append(str(ROOT_DIR))
-
-# --- Импорты наших модулей ---
-from bot.memory.memory_sqlite import init_db, add_task, add_note, list_tasks, list_notes
-from bot.memory.intent import classify_intent, process_intent
+import sqlite3
+from bot.memory.memory_sqlite import (
+    DB_PATH,
+    init_db,
+    add_task,
+    add_note,
+    list_tasks,
+    list_notes,
+)
+from bot.memory.intent import detect_intent, GPT_CALL_COUNT
 from bot.memory.capture import offer_capture, handle_capture_callback
 
-logging.basicConfig(level=logging.INFO)
+# =========================
+# Хелперы для тестов
+# =========================
 
-# --- Заглушка для ask_gpt ---
-# В тестах GPT нам не нужен, поэтому возвращаем сразу "task" или "note"
-import bot.memory.intent as intent_module
-async def fake_ask_gpt(prompt: str, system: str = None) -> str:
-    # Для теста можно вернуть "task" или "note" в зависимости от текста
-    if "задача" in prompt.lower() or "сделать" in prompt.lower():
-        return "task"
-    elif "заметка" in prompt.lower() or "идея" in prompt.lower():
-        return "note"
-    return "none"
+def reset_db():
+    """Очистка SQLite-базы перед тестами"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tasks;")
+    cur.execute("DELETE FROM notes;")
+    conn.commit()
+    conn.close()
+    print("🗑️  DB очищена перед тестами")
 
-intent_module.ask_gpt = fake_ask_gpt  # <- подключаем заглушку
-
-# --- Fake объекты для теста ---
 class FakeMessage:
     def __init__(self, text, user_id=123):
         self.text = text
-        self.from_user = SimpleNamespace(id=user_id)
-    async def answer(self, text, reply_markup=None):
-        print(f"[Bot Answer] {text}")
-    async def edit_text(self, text):
-        print(f"[Edit Message] {text}")
+        self.from_user = type("User", (), {"id": user_id})
+
+    async def answer(self, text, **kwargs):
+        print(f"[Bot Answer] {text} | kwargs={kwargs}")
+
+    async def edit_text(self, text, **kwargs):
+        print(f"[Edit Message] {text} | kwargs={kwargs}")
+
 
 class FakeCallback:
     def __init__(self, data, user_id=123):
         self.data = data
-        self.from_user = SimpleNamespace(id=user_id)
-        self.message = FakeMessage("Original message")
-    async def answer(self, text: str = None, show_alert: bool = False):
+        self.from_user = type("User", (), {"id": user_id})
+
+    async def answer(self, text=None, show_alert=False):
         print(f"[Callback answer] text={text} show_alert={show_alert}")
 
-# --- Главная функция теста ---
+
+# =========================
+# Основной тест
+# =========================
+
 async def run_tests():
-    print("=== Тестирование SQLite-хранилища MVP ===")
+    print("\n\n🚀 Запуск комплексного теста памяти\n")
+
+    # очистка БД
+    reset_db()
+
+    # ==================================================
+    print("\n" + "=" * 50)
+    print("✨ SQLite (tasks + notes)")
+    print("=" * 50)
+
     init_db()
-    print("База инициализирована ✅\n")
+    await add_task(1, "тестовое задание")
+    await add_note(1, "Идея для проекта")
+    tasks = await list_tasks()
+    notes = await list_notes()
+    print("📌 Tasks:", tasks)
+    print("📝 Notes:", notes)
 
-    # --- Тест Intent ---
-    test_texts = [
-        "Сделать завтра отчёт",
-        "Записать идею для проекта",
-        "Привет, как дела?"
-    ]
+    # ==================================================
+    print("\n" + "=" * 50)
+    print("✨ Intent + Cache")
+    print("=" * 50)
 
-    for text in test_texts:
-        intent = await classify_intent(text)  # <- обязательно await для async функции
-        print(f"Text: '{text}' -> Intent: {intent}")
+    q = "Нужно сделать отчёт"
+    result1 = await detect_intent(q)
+    print("⚡ First call:", result1, "| GPT calls:", GPT_CALL_COUNT)
+    result2 = await detect_intent(q)
+    print("⚡ Second call (cached):", result2, "| GPT calls:", GPT_CALL_COUNT)
 
-        # Если задача или заметка, вызываем offer_capture
-        msg = FakeMessage(text)
-        if intent in ("task", "note"):
-            await offer_capture(msg)
+    # ==================================================
+    print("\n" + "=" * 50)
+    print("✨ Capture + Callback (интеграция)")
+    print("=" * 50)
 
-    # --- Тест сохранения через callback ---
-    print("\n=== Тест callback сохранения ===")
-    task_cb = FakeCallback("capture:task:Сделать отчёт")
-    note_cb = FakeCallback("capture:note:Идея для заметки")
-    await handle_capture_callback(task_cb)
-    await handle_capture_callback(note_cb)
+    msg = FakeMessage("Сделать отчёт")
+    await offer_capture(msg)
 
-    # --- Проверяем данные в БД ---
-    tasks = list_tasks()
-    notes = list_notes()
-    print("\nTasks in DB:", tasks)
-    print("Notes in DB:", notes)
+    # достаём ID из capture_store напрямую
+    from bot.memory import capture as capture_module
+    stored_id = list(capture_module.capture_store.keys())[0]
 
-# --- Запуск теста ---
+    cb = FakeCallback(f"capture:task:{stored_id}")
+    await handle_capture_callback(cb)
+
+    final_tasks = await list_tasks()
+    print("✅ Final tasks in DB:", final_tasks)
+
+    print("\n🎉 Все блоки памяти протестированы успешно!")
+
+
 if __name__ == "__main__":
     asyncio.run(run_tests())
