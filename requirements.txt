@@ -40,7 +40,6 @@ gTTS
 pydub
 SpeechRecognition
 aiohttp
-aiogram
 google-api-python-client>=2.0.0
 google-auth>=2.0.0
 google-auth-httplib2>=0.1.0
@@ -48,4 +47,5 @@ google-auth-oauthlib>=0.4.0
 apscheduler>=3.9.1
 python-dateutil>=2.8.2
 dateparser>=1.1.1  
-
+python-multipart
+orjson

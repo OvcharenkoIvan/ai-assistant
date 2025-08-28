@@ -1,7 +1,29 @@
+# Виртуальные окружения
+venv/
 .env
-__pycache__/
-.vscode/
-*.pyc
-venv/
 .env.*
-venv/
+
+# Python кэш
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# Логи
+logs/*.log
+
+# SQLite базы
+*.db
+*.sqlite3
+
+# Тестовые артефакты
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Системное
+.DS_Store
+Thumbs.db
