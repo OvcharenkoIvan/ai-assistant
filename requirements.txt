@@ -49,3 +49,5 @@ python-dateutil>=2.8.2
 dateparser>=1.1.1  
 python-multipart
 orjson
+pytest
+pytest-asyncio

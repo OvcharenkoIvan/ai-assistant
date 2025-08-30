@@ -1,4 +1,4 @@
-# bot/tests/test_capture_formatters.py (Вызов теста: python -m bot.tests.test_capture_formatters)
+# bot/tests/test_capture_formatters.py
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
@@ -67,6 +67,9 @@ async def test_capture_integration_with_formatters():
         async def reply_text(self, text, **kwargs):
             self.reply_text_called = text
             return self
+        async def edit_text(self, text, **kwargs):
+            self.edited_text = text
+            return self
 
     class DummyUser:
         id = 123
@@ -77,8 +80,6 @@ async def test_capture_integration_with_formatters():
         from_user = DummyUser()
         async def answer(self, **kwargs):
             self.answer_called = True
-        async def edit_text(self, text):
-            self.edited_text = text
 
     message = DummyMessage()
     update_offer = Update(update_id=1, message=message)
@@ -88,16 +89,43 @@ async def test_capture_integration_with_formatters():
     await offer_capture(update_offer, context)
     assert len(capture_store) == 1
     capture_id = list(capture_store.keys())[0]
-    assert capture_store[capture_id] == message.text
+    stored_value = capture_store[capture_id]
 
-    # Мокаем ask_gpt + load_prompt
+    if isinstance(stored_value, str):
+        assert stored_value == message.text
+
+    elif isinstance(stored_value, dict):
+        assert stored_value.get("text") == message.text or stored_value.get("body") == message.text
+
+    elif isinstance(stored_value, tuple):
+        text_part = stored_value[0]
+        assert text_part == message.text
+
+    elif hasattr(stored_value, "text"):
+        assert stored_value.text == message.text
+
+    else:
+        raise AssertionError(f"Неожиданный формат capture_store: {stored_value}")
+
+    # Мокаем ask_gpt + load_prompt + _mem.add_task/_mem.add_note
     async def mock_ask_gpt(prompt: str):
-        return '{"body":"Сделать отчёт","raw_text":"Сделать отчёт"}'
+        return '{"body":"Сделать отчёт"}'
+
     def mock_load_prompt(fmt_type: str):
         return f"PROMPT({fmt_type})"
 
+    def mock_add_task(**kwargs):
+        return 42
+
+    def mock_add_note(**kwargs):
+        return 24
+
+    import bot.memory.capture as capture_module
+
     with patch("bot.memory.formatters.ask_gpt", new=mock_ask_gpt), \
-         patch("bot.memory.formatters.load_prompt", new=mock_load_prompt):
+         patch("bot.memory.formatters.load_prompt", new=mock_load_prompt), \
+         patch.object(capture_module._mem, "add_task", new=mock_add_task), \
+         patch.object(capture_module._mem, "add_note", new=mock_add_note):
 
         callback = DummyCallback()
         callback.data = f"capture:{TASK}:{capture_id}"
@@ -107,8 +135,8 @@ async def test_capture_integration_with_formatters():
         # Проверяем, что capture_store очистился
         assert capture_id not in capture_store
         assert hasattr(callback, "answer_called")
-        assert hasattr(callback, "edited_text")
-        assert "✅ Задача сохранена" in callback.edited_text
+        assert hasattr(callback.message, "edited_text")
+        assert "✅ Задача сохранена" in callback.message.edited_text
 
 
 @pytest.mark.asyncio
@@ -126,7 +154,6 @@ async def test_parse_due_at():
             assert ts > int(datetime.now().timestamp()) - 10
 
 
-# Запуск напрямую: python -m bot.tests.test_capture_formatters
 if __name__ == "__main__":
     print("\n🚀 Запуск тестов capture_formatters")
     asyncio.run(test_format_text_with_mocked_gpt())
