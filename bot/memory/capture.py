@@ -51,13 +51,23 @@ def build_capture_keyboard(capture_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-async def offer_capture(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def offer_capture(source, context=None):
     """
     Показывает пользователю inline-кнопки для сохранения текста.
+    source: Update или Message (Telegram)
+    context: ContextTypes.DEFAULT_TYPE (опционально)
     """
-    message = update.effective_message
+    # Если передан Update
+    if hasattr(source, "message"):
+        message = source.message
+    else:  # Если передан Message напрямую
+        message = source
+
     if not message or not message.text:
         return
+
+    import uuid
+    from datetime import datetime
 
     capture_id = str(uuid.uuid4())
     capture_store[capture_id] = (message.text, datetime.now())

@@ -51,3 +51,6 @@ python-multipart
 orjson
 pytest
 pytest-asyncio
+dateparser
+fastapi
+uvicorn

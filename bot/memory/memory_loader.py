@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 from typing import Optional
+import asyncio  # добавлен импорт для запуска корутины
 
 from .memory_base import MemoryBackend
 from . import memory_inmemory as inm
@@ -16,11 +17,12 @@ _MEMORY_INSTANCE: Optional[MemoryBackend] = None
 class _SQLiteAdapter(MemoryBackend):
     """
     Адаптер MemoryBackend поверх существующего procedural memory_sqlite.py.
-    Не меняет существующие функции — вызывает их напрямую.
+    Не изменяет существующие функции — вызывает их напрямую.
     """
 
     def __init__(self) -> None:
-        sql.init_db()
+        # Корректный запуск асинхронной инициализации
+        asyncio.run(sql.init_db())
         logger.info("SQLiteAdapter initialized (DB path: %s)", getattr(sql, "_DB_PATH", "unknown"))
 
     def init(self) -> None:
