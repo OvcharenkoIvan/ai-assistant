@@ -1,143 +1,165 @@
-# bot/memory/memory_sqlite.py
-"""
-Асинхронное SQLite-хранилище для ассистента.
-Все операции через asyncio.to_thread, чтобы не блокировать event loop.
-"""
-
-from __future__ import annotations
-import sqlite3
-import time
-import logging
-import os
-from pathlib import Path
-from typing import Optional, List, Dict, Any
+# bot/main.py
+import sys
 import asyncio
+import logging
+from functools import partial
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from telegram import BotCommand, ReplyKeyboardMarkup, KeyboardButton, Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
-_DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).resolve().parents[2] / "data" / "assistant.db"))
-_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# --- Модули бота ---
+from bot.memory.intent import process_intent
+from bot.commands.start_help import start, help_command
+from bot.commands.voice import voice_on, voice_off, voice_status
+from bot.commands import notes, tasks
+from bot.gpt.chat import chat_with_gpt
+from bot.memory.memory_loader import get_memory
+from bot.core.config import TELEGRAM_TOKEN
 
-def _connect() -> sqlite3.Connection:
-    con = sqlite3.connect(str(_DB_PATH), timeout=30, detect_types=sqlite3.PARSE_DECLTYPES)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    return con
+# --- Настройка корня проекта ---
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.append(str(ROOT_DIR))
 
-# ---------------------
-# Синхронная логика
-# ---------------------
-def _init_db_sync() -> None:
-    con = _connect()
-    with con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NULL,
-                text TEXT NOT NULL,
-                due_at INTEGER NULL,
-                status TEXT NOT NULL DEFAULT 'open',
-                created_at INTEGER NOT NULL
-            );
-        """)
-        con.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status);")
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NULL,
-                text TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-        """)
-    con.close()
-    logger.info("SQLite: init_db completed (%s)", _DB_PATH)
+# --- Owner ID (для клавиатуры управления голосом) ---
+OWNER_ID = 423368779
 
-def _add_task_sync(text: str, user_id: Optional[int], due_at: Optional[int]) -> int:
-    ts = int(time.time())
-    con = _connect()
-    with con:
-        cur = con.execute(
-            "INSERT INTO tasks (user_id, text, due_at, status, created_at) VALUES (?, ?, ?, 'open', ?)",
-            (user_id, text, due_at, ts),
-        )
-        task_id = cur.lastrowid
-    con.close()
-    logger.debug("add_task -> id=%s user_id=%s", task_id, user_id)
-    return task_id
+# --- Проверка токена перед запуском ---
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("❌ TELEGRAM_TOKEN не найден")
 
-def _list_tasks_sync(user_id: Optional[int] = None, status: Optional[str] = None,
-                     limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    con = _connect()
+# --- Настройка логирования ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
+# --- Клавиатура для голосового управления ---
+voice_keyboard = ReplyKeyboardMarkup(
+    [[KeyboardButton("🔊 Включить голос"), KeyboardButton("🔇 Выключить голос")]],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
+
+# --- Инициализация памяти ---
+_mem = get_memory()  # Возвращает экземпляр MemorySQLite или аналогичного класса
+
+
+async def send_owner_keyboard(app):
+    """Отправляет владельцу бота клавиатуру для голосового управления"""
     try:
-        q = "SELECT id, user_id, text, due_at, status, created_at FROM tasks"
-        conds = []
-        params: List[Any] = []
-        if user_id is not None:
-            conds.append("user_id = ?")
-            params.append(user_id)
-        if status is not None:
-            conds.append("status = ?")
-            params.append(status)
-        if conds:
-            q += " WHERE " + " AND ".join(conds)
-        q += " ORDER BY created_at DESC"
-        if limit is not None:
-            q += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-        cur = con.execute(q, tuple(params))
-        return [dict(row) for row in cur.fetchall()]
-    finally:
-        con.close()
-
-def _add_note_sync(text: str, user_id: Optional[int] = None) -> int:
-    ts = int(time.time())
-    con = _connect()
-    with con:
-        cur = con.execute(
-            "INSERT INTO notes (user_id, text, created_at) VALUES (?, ?, ?)",
-            (user_id, text, ts),
+        await app.bot.send_message(
+            chat_id=OWNER_ID,
+            text="Клавиатура для управления голосом активирована:",
+            reply_markup=voice_keyboard
         )
-        note_id = cur.lastrowid
-    con.close()
-    logger.debug("add_note -> id=%s user_id=%s", note_id, user_id)
-    return note_id
+        logging.info(f"📲 Клавиатура отправлена пользователю {OWNER_ID}")
+    except Exception as e:
+        logging.error(f"❌ Не удалось отправить клавиатуру владельцу: {e}")
 
-def _list_notes_sync(user_id: Optional[int] = None, limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    con = _connect()
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обработчик текстовых сообщений:
+    1. Пробуем понять интент через process_intent (Smart Capture)
+    2. Если интент не распознан, отправляем на GPT
+    """
+    if not update.message or not update.message.text:
+        return
+
+    handled = await process_intent(update.message)
+    if not handled:
+        await chat_with_gpt(update, context)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Глобальный обработчик ошибок для логирования и безопасности продакшн"""
+    logging.error(f"❌ Ошибка обработки обновления: {update}", exc_info=context.error)
+
+
+async def main():
+    """Главная функция запуска бота"""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # --- Создаем приложение ---
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    # --- Настройка меню команд бота ---
+    await app.bot.set_my_commands([
+        BotCommand("start", "Запустить бота"),
+        BotCommand("help", "Список команд"),
+        BotCommand("voice_on", "Включить голосовые ответы"),
+        BotCommand("voice_off", "Выключить голосовые ответы"),
+        BotCommand("voice_status", "Проверить статус голосового режима"),
+        BotCommand("keyboard", "Открыть клавиатуру управления"),
+        BotCommand("note", "Сохранить заметку"),
+        BotCommand("notes", "Показать все заметки"),
+        BotCommand("search", "Поиск заметок"),
+        BotCommand("reset", "Удалить все заметки"),
+        BotCommand("task", "Добавить задачу"),
+        BotCommand("tasks", "Показать все задачи"),
+        BotCommand("reset_tasks", "Удалить все задачи"),
+    ])
+
+    # --- Глобальный обработчик ошибок ---
+    app.add_error_handler(error_handler)
+
+    # --- CommandHandler для стандартных команд ---
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("voice_on", voice_on))
+    app.add_handler(CommandHandler("voice_off", voice_off))
+    app.add_handler(CommandHandler("voice_status", voice_status))
+
+    # --- Notes: используем partial для передачи _mem ---
+    app.add_handler(CommandHandler("note", partial(notes.note, _mem=_mem)))
+    app.add_handler(CommandHandler("notes", partial(notes.notes, _mem=_mem)))
+    app.add_handler(CommandHandler("reset", partial(notes.reset, _mem=_mem)))
+    app.add_handler(CommandHandler("search", partial(notes.search, _mem=_mem)))
+
+    # --- Tasks: partial для передачи _mem ---
+    app.add_handler(CommandHandler("task", partial(tasks.add_task_command, _mem=_mem)))
+    app.add_handler(CommandHandler("tasks", partial(tasks.tasks, _mem=_mem)))
+    app.add_handler(CommandHandler("reset_tasks", partial(tasks.reset_tasks, _mem=_mem)))
+
+    # --- Голосовые команды через клавиатуру ---
+    app.add_handler(MessageHandler(filters.Regex("^🔊 Включить голос$"), voice_on))
+    app.add_handler(MessageHandler(filters.Regex("^🔇 Выключить голос$"), voice_off))
+
+    # --- Inline кнопки Smart Capture ---
+    app.add_handler(CallbackQueryHandler(handle_capture_callback, pattern=r"^capture:"))
+
+    # --- Текстовые сообщения: GPT + Smart Capture ---
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+
+    # --- Запуск бота и отправка клавиатуры владельцу ---
+    me = await app.bot.get_me()
+    logging.info(f"🤖 Бот запущен: @{me.username} (id={me.id})")
+    await send_owner_keyboard(app)
+    await app.run_polling()
+
+
+if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()
     try:
-        q = "SELECT id, user_id, text, created_at FROM notes"
-        conds = []
-        params: List[Any] = []
-        if user_id is not None:
-            conds.append("user_id = ?")
-            params.append(user_id)
-        if conds:
-            q += " WHERE " + " AND ".join(conds)
-        q += " ORDER BY created_at DESC"
-        if limit is not None:
-            q += " LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-        cur = con.execute(q, tuple(params))
-        return [dict(row) for row in cur.fetchall()]
-    finally:
-        con.close()
-
-# ---------------------
-# Асинхронные обёртки
-# ---------------------
-async def init_db() -> None:
-    await asyncio.to_thread(_init_db_sync)
-
-async def add_task(text: str, user_id: Optional[int] = None, due_at: Optional[int] = None) -> int:
-    return await asyncio.to_thread(_add_task_sync, text, user_id, due_at)
-
-async def list_tasks(user_id: Optional[int] = None, status: Optional[str] = None,
-                     limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    return await asyncio.to_thread(_list_tasks_sync, user_id, status, limit, offset)
-
-async def add_note(text: str, user_id: Optional[int] = None) -> int:
-    return await asyncio.to_thread(_add_note_sync, text, user_id)
-
-async def list_notes(user_id: Optional[int] = None, limit: Optional[int] = 100, offset: int = 0) -> List[Dict[str, Any]]:
-    return await asyncio.to_thread(_list_notes_sync, user_id, limit, offset)
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "event loop is already running" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+            loop.run_forever()
+        else:
+            raise
+# bot/memory/capture.py
+import asyncio

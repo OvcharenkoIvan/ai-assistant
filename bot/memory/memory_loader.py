@@ -3,11 +3,9 @@ from __future__ import annotations
 import os
 import logging
 from typing import Optional
-import asyncio  # добавлен импорт для запуска корутины
-
+from .memory_sqlite import MemorySQLite
 from .memory_base import MemoryBackend
 from . import memory_inmemory as inm
-from . import memory_sqlite as sql  # существующий модуль с SQLite-функциями
 
 logger = logging.getLogger(__name__)
 
@@ -16,52 +14,90 @@ _MEMORY_INSTANCE: Optional[MemoryBackend] = None
 
 class _SQLiteAdapter(MemoryBackend):
     """
-    Адаптер MemoryBackend поверх существующего procedural memory_sqlite.py.
-    Не изменяет существующие функции — вызывает их напрямую.
+    Адаптер MemoryBackend поверх MemorySQLite.
+    Сохраняет один экземпляр MemorySQLite для всего бота.
+    Поддерживает raw_text и extra, чтобы capture.py работал корректно.
     """
 
     def __init__(self) -> None:
-        # Корректный запуск асинхронной инициализации
-        asyncio.run(sql.init_db())
-        logger.info("SQLiteAdapter initialized (DB path: %s)", getattr(sql, "_DB_PATH", "unknown"))
+        # создаём один экземпляр класса MemorySQLite
+        self._sqlite = MemorySQLite()
+        logger.info("SQLiteAdapter initialized (DB path: %s)", self._sqlite.db_path)
 
     def init(self) -> None:
         # DB уже инициализирован в __init__
         return
 
-    def add_task(self, text: str, user_id: Optional[int] = None, due_at: Optional[int] = None) -> int:
-        return sql.add_task(text=text, user_id=user_id, due_at=due_at)
-
-    def add_note(self, text: str, user_id: Optional[int] = None) -> int:
-        return sql.add_note(text=text, user_id=user_id)
-
-    def list_tasks(self, user_id: Optional[int] = None, status: Optional[str] = None,
-                   limit: Optional[int] = 100, offset: int = 0):
-        return sql.list_tasks(user_id=user_id, status=status, limit=limit, offset=offset)
-
-    def list_notes(self, user_id: Optional[int] = None, limit: Optional[int] = 100, offset: int = 0):
-        return sql.list_notes(user_id=user_id, limit=limit, offset=offset)
+    # --- Задачи ---
+    def add_task(
+        self,
+        text: str,
+        user_id: Optional[int] = None,
+        *,
+        raw_text: Optional[str] = None,
+        due_at: Optional[int] = None,
+        extra: Optional[dict] = None
+    ) -> int:
+        return self._sqlite.add_task(
+            user_id=user_id or 0,
+            text=text,
+            raw_text=raw_text,
+            due_at=due_at,
+            extra=extra,
+        )
 
     def get_task(self, task_id: int):
-        return sql.get_task(task_id)
+        return self._sqlite.get_task(task_id)
 
-    def get_note(self, note_id: int):
-        return sql.get_note(note_id)
+    def list_tasks(
+        self,
+        user_id: Optional[int] = None,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ):
+        return self._sqlite.list_tasks(user_id=user_id, status=status, limit=limit, offset=offset)
 
     def update_task_status(self, task_id: int, status: str) -> bool:
-        return sql.update_task_status(task_id, status)
+        return self._sqlite.update_task(task_id, status=status)
 
     def delete_task(self, task_id: int) -> bool:
-        return sql.delete_task(task_id)
+        return self._sqlite.delete_task(task_id)
+
+    # --- Заметки ---
+    def add_note(
+        self,
+        text: str,
+        user_id: Optional[int] = None,
+        *,
+        raw_text: Optional[str] = None,
+        extra: Optional[dict] = None
+    ) -> int:
+        return self._sqlite.add_note(
+            user_id=user_id or 0,
+            text=text,
+            raw_text=raw_text,
+            extra=extra,
+        )
+
+    def get_note(self, note_id: int):
+        return self._sqlite.get_note(note_id)
+
+    def list_notes(
+        self,
+        user_id: Optional[int] = None,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ):
+        return self._sqlite.list_notes(user_id=user_id, limit=limit, offset=offset)
 
     def delete_note(self, note_id: int) -> bool:
-        return sql.delete_note(note_id)
+        return self._sqlite.delete_note(note_id)
 
-# --- Получение singleton-инстанса ---
+
 def get_memory(backend: Optional[str] = None) -> MemoryBackend:
     """
-    Возвращает singleton MemoryBackend.
-    backend: 'sqlite' | 'inmemory' — если не указан, берётся из ENV MEMORY_BACKEND
+    Возвращает singleton MemoryBackend для всего бота.
     """
     global _MEMORY_INSTANCE
     if _MEMORY_INSTANCE is not None:
