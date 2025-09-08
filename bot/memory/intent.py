@@ -100,6 +100,9 @@ async def process_intent(message: Message) -> None:
     if not message.text:
         return
 
+    # локальный импорт, чтобы избежать circular import
+    from bot.memory.capture import offer_capture
+
     result = await detect_intent(message.text)
     intent, conf, source = result["intent"], result["confidence"], result["source"]
 
@@ -109,3 +112,6 @@ async def process_intent(message: Message) -> None:
         await offer_capture(message)
     elif intent in ("task", "note") and 0.4 <= conf < 0.6:
         logger.debug("Низкая уверенность, стоит уточнить у пользователя.")
+        # Здесь можно реализовать уточнение у пользователя
+    else:
+        logger.debug("Намерение не распознано или не требуется действие.")  
