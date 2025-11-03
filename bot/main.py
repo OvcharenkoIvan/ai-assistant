@@ -23,14 +23,20 @@ from bot.commands.voice import voice_on, voice_off, voice_status
 from bot.commands import notes, tasks
 from bot.gpt.chat import chat_with_gpt
 from bot.memory.memory_loader import get_memory
-from bot.core.config import TELEGRAM_TOKEN
+from bot.core.config import TELEGRAM_TOKEN, OWNER_ID, LOG_LEVEL
+
+# 🔔 Планировщик (pull-sync Google + дайджесты + бэкапы)
+from bot.scheduler.scheduler import start_scheduler
+
+# 🧩 Действия с задачами (перенос/выполнить/удалить) + перехват текста для рескейджла
+from bot.commands.task_actions import handle_task_action_callback, handle_reschedule_text
 
 # --- Настройка корня проекта ---
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-# --- Owner ID (для клавиатуры управления голосом) ---
-OWNER_ID = 423368779
+# --- Owner ID (клавиатура и админ-уведомления) ---
+OWNER_ID = OWNER_ID or 0
 
 # --- Проверка токена перед запуском ---
 if not TELEGRAM_TOKEN:
@@ -38,7 +44,7 @@ if not TELEGRAM_TOKEN:
 
 # --- Настройка логирования ---
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -52,28 +58,33 @@ voice_keyboard = ReplyKeyboardMarkup(
 )
 
 # --- Инициализация памяти ---
-_mem = get_memory()  # Возвращает экземпляр MemorySQLite или аналогичного класса
+_mem = get_memory()  # общий адаптер MemorySQLite / InMemory
 
 
 async def send_owner_keyboard(app):
     """Отправляет владельцу бота клавиатуру для голосового управления"""
+    if not OWNER_ID:
+        return
     try:
         await app.bot.send_message(
             chat_id=OWNER_ID,
             text="Клавиатура для управления голосом активирована:",
             reply_markup=voice_keyboard
         )
-        logging.info(f"📲 Клавиатура отправлена пользователю {OWNER_ID}")
+        logging.info("📲 Клавиатура отправлена владельцу")
     except Exception as e:
         logging.error(f"❌ Не удалось отправить клавиатуру владельцу: {e}")
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработчик текстовых сообщений:
-    1. Пробуем понять интент через process_intent (Smart Capture)
-    2. Если интент не распознан, отправляем на GPT
+    1) Если ждём новую дату/время для переноса — обрабатываем и выходим.
+    2) Иначе: Smart Capture → GPT.
     """
+    processed = await handle_reschedule_text(update, context, _mem=_mem)
+    if processed:
+        return
+
     if not update.message or not update.message.text:
         return
 
@@ -83,7 +94,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Глобальный обработчик ошибок для логирования и безопасности продакшн"""
+    """Глобальный обработчик ошибок"""
     logging.error(f"❌ Ошибка обработки обновления: {update}", exc_info=context.error)
 
 
@@ -95,7 +106,7 @@ async def main():
     # --- Создаем приложение ---
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # --- Настройка меню команд бота ---
+    # --- Меню команд ---
     await app.bot.set_my_commands([
         BotCommand("start", "Запустить бота"),
         BotCommand("help", "Список команд"),
@@ -110,43 +121,53 @@ async def main():
         BotCommand("task", "Добавить задачу"),
         BotCommand("tasks", "Показать все задачи"),
         BotCommand("reset_tasks", "Удалить все задачи"),
+        BotCommand("complete", "Отметить задачу выполненной"),
     ])
 
-    # --- Глобальный обработчик ошибок ---
+    # --- Ошибки ---
     app.add_error_handler(error_handler)
 
-    # --- CommandHandler для стандартных команд ---
+    # --- Commands ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("voice_on", voice_on))
     app.add_handler(CommandHandler("voice_off", voice_off))
     app.add_handler(CommandHandler("voice_status", voice_status))
 
-    # --- Notes: используем partial для передачи _mem ---
+    # --- Notes ---
     app.add_handler(CommandHandler("note", partial(notes.note, _mem=_mem)))
     app.add_handler(CommandHandler("notes", partial(notes.notes, _mem=_mem)))
     app.add_handler(CommandHandler("reset", partial(notes.reset, _mem=_mem)))
     app.add_handler(CommandHandler("search", partial(notes.search, _mem=_mem)))
 
-    # --- Tasks: partial для передачи _mem ---
+    # --- Tasks ---
     app.add_handler(CommandHandler("task", partial(tasks.add_task_command, _mem=_mem)))
     app.add_handler(CommandHandler("tasks", partial(tasks.tasks, _mem=_mem)))
     app.add_handler(CommandHandler("reset_tasks", partial(tasks.reset_tasks, _mem=_mem)))
+    app.add_handler(CommandHandler("complete", partial(tasks.complete_task, _mem=_mem)))
 
-    # --- Голосовые команды через клавиатуру ---
+    # --- Голосовые кнопки ---
     app.add_handler(MessageHandler(filters.Regex("^🔊 Включить голос$"), voice_on))
     app.add_handler(MessageHandler(filters.Regex("^🔇 Выключить голос$"), voice_off))
 
-    # --- Inline кнопки Smart Capture ---
+    # --- Smart Capture ---
     app.add_handler(CallbackQueryHandler(handle_capture_callback, pattern=r"^capture:"))
+
+    # --- Task Actions ---
+    app.add_handler(CallbackQueryHandler(partial(handle_task_action_callback, _mem=_mem), pattern=r"^task_action:"))
 
     # --- Текстовые сообщения: GPT + Smart Capture ---
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # --- Запуск бота и отправка клавиатуры владельцу ---
+    # --- Запуск бота ---
     me = await app.bot.get_me()
     logging.info(f"🤖 Бот запущен: @{me.username} (id={me.id})")
     await send_owner_keyboard(app)
+
+    # --- Планировщик: pull-sync + дайджесты + бэкапы ---
+    start_scheduler(app, _mem, OWNER_ID)
+
+    # --- Polling ---
     await app.run_polling()
 
 
@@ -162,5 +183,3 @@ if __name__ == "__main__":
             loop.run_forever()
         else:
             raise
-# bot/memory/capture.py
-import asyncio

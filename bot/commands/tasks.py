@@ -1,82 +1,290 @@
 # bot/commands/tasks.py
+from __future__ import annotations
+
+import logging
+import asyncio
+import re
+from typing import Optional, Any, List
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import dateparser
 from telegram import Update
 from telegram.ext import ContextTypes
-from bot.memory.memory_loader import get_memory
-from bot.core.logger import log_action
-from functools import partial
 
-# Singleton memory instance
-_mem = get_memory()
+from bot.core.config import TZ
+from bot.integrations.google_calendar import GoogleCalendarClient
+
+logger = logging.getLogger(__name__)
 
 
-async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------------------------
+# Helpers
+# ---------------------------
+
+async def _run_blocking(func, *args, **kwargs):
+    """Run sync function in executor to avoid blocking PTB event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
+
+def _fmt_epoch(due_at: Optional[int]) -> str:
+    if not due_at:
+        return "—"
+    try:
+        return datetime.fromtimestamp(int(due_at), tz=ZoneInfo(TZ)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(due_at)
+
+
+def _parse_due_at_and_flags(text: str) -> tuple[Optional[int], dict]:
     """
-    Добавляет новую задачу для пользователя.
-    Команда: /task <текст>
+    Parse natural language date/time. Returns (epoch or None, extra_flags).
+    Marks all_day if no explicit time or triggers (e.g., 'весь день', 'день рождения', 'др').
     """
-    user_id = update.effective_user.id
-    text = " ".join(context.args).strip()
-    if not text:
-        await update.message.reply_text("⚠️ Укажи текст задачи: /task <текст>")
+    tzinfo = ZoneInfo(TZ)
+    settings = {
+        "TIMEZONE": TZ,
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",
+        "RELATIVE_BASE": datetime.now(tzinfo),
+        "PARSERS": ["relative-time", "absolute-time", "timestamp", "custom-formats"],
+        "SKIP_TOKENS": ["в", "около", "к", "на"],
+    }
+
+    dt = dateparser.parse(text, settings=settings)
+    extra_flags: dict = {}
+    if not dt:
+        return None, extra_flags
+
+    all_day_triggers = bool(re.search(r"\b(весь день|целый день|день рождения|др|birthday)\b", text, re.IGNORECASE))
+    time_explicit = bool(re.search(r"\b([01]?\d|2[0-3])[:.]\d{2}\b", text)) or bool(
+        re.search(r"\bв\s*([01]?\d|2[0-3])\s*час", text, re.IGNORECASE)
+    )
+
+    epoch = int(dt.timestamp())
+    if all_day_triggers or (dt.hour == 0 and dt.minute == 0 and not time_explicit):
+        extra_flags["all_day"] = True
+
+    return epoch, extra_flags
+
+
+# ---------------------------
+# /task — добавить задачу
+# ---------------------------
+
+async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
+    """
+    /task <текст> — добавляет задачу. Пытается распознать дату/время.
+    Если есть due_at и подключён Google — создаёт событие в календаре.
+    """
+    if not update.message:
         return
 
-    task_id = await _mem.add_task(user_id=user_id, text=text)
-    log_action(f"User {user_id} добавил задачу (id={task_id}): {text}")
-    await update.message.reply_text("✅ Задача сохранена!")
-
-
-async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Выводит список открытых задач пользователя.
-    Команда: /tasks
-    """
-    user_id = update.effective_user.id
-    tasks_list = await _mem.list_tasks(user_id=user_id, status="open")
-    if not tasks_list:
-        await update.message.reply_text("📭 Нет открытых задач.")
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Не удалось определить пользователя.")
         return
 
-    msg = "\n".join(f"{i+1}. {t.text}" for i, t in enumerate(tasks_list[:20]))
-    if len(tasks_list) > 20:
-        msg += f"\n\n⚠️ Показаны первые 20 из {len(tasks_list)}"
-    await update.message.reply_text("📝 Твои задачи:\n" + msg)
+    raw = (update.message.text or "").strip()
+    # срезаем саму команду
+    if raw.startswith("/task"):
+        raw = raw[len("/task"):].strip()
+
+    if not raw:
+        await update.message.reply_text(
+            "Укажи текст задачи, например:\n"
+            "/task Встреча с Петром завтра в 15:00"
+        )
+        return
+
+    due_at, flags = _parse_due_at_and_flags(raw)
+    extra = {"source": "cmd:/task"}
+    extra.update(flags)
+
+    # 1) локально
+    try:
+        task_id = await _run_blocking(
+            _mem.add_task,
+            user_id=user.id,
+            text=raw,
+            raw_text=raw,
+            due_at=due_at,
+            extra=extra,
+        )
+        logger.info("Task via /task: id=%s user_id=%s due_at=%s", task_id, user.id, due_at)
+    except Exception as e:
+        logger.exception("add_task_command: DB error: %s", e)
+        await update.message.reply_text("❌ Ошибка: не удалось сохранить задачу.")
+        return
+
+    # 2) Google Calendar (если есть due_at)
+    created_in_calendar = False
+    try:
+        if due_at:
+            gc = GoogleCalendarClient(_mem)
+            if gc.is_connected(user.id):
+                task_obj = await _run_blocking(_mem.get_task, task_id)
+                if task_obj:
+                    await _run_blocking(gc.create_event, user.id, task_obj)
+                    created_in_calendar = True
+    except Exception as e:
+        logger.warning("add_task_command: failed Google event create, task_id=%s: %s", task_id, e)
+
+    suffix = ""
+    if due_at:
+        suffix += f" (срок: {_fmt_epoch(due_at)})"
+    if created_in_calendar:
+        suffix += " • 📅 добавлено в Google Calendar"
+
+    await update.message.reply_text(f"✅ Задача сохранена (id={task_id}){suffix}")
 
 
-async def reset_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Удаляет все задачи пользователя.
-    Команда: /reset_tasks
-    """
-    user_id = update.effective_user.id
-    tasks_list = await _mem.list_tasks(user_id=user_id)
-    for t in tasks_list:
-        await _mem.delete_task(t.id)
-    log_action(f"User {user_id} удалил все задачи")
-    await update.message.reply_text("🗑 Все задачи удалены.")
+# ---------------------------
+# /tasks — список задач
+# ---------------------------
 
-
-async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
     """
-    Отмечает задачу как выполненную.
-    Команда: /complete <номер>
+    Показывает список открытых задач.
     """
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("⚠️ Укажи номер задачи для завершения: /complete <номер>")
+    if not update.message:
+        return
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Не удалось определить пользователя.")
         return
 
     try:
-        task_num = int(context.args[0])
+        items = await _run_blocking(_mem.list_tasks, user_id=user.id, status="open", limit=50, offset=0)
+    except Exception as e:
+        logger.exception("tasks: DB error: %s", e)
+        await update.message.reply_text("❌ Ошибка: не удалось получить список задач.")
+        return
+
+    if not items:
+        await update.message.reply_text("📭 Нет открытых задач.")
+        return
+
+    lines: List[str] = []
+    for t in items:
+        mark = "🕒" if t.due_at else "•"
+        cal = " 📅" if getattr(t, "calendar_event_id", None) else ""
+        lines.append(f"{mark} [{t.id}] {t.text}{cal}  (срок: {_fmt_epoch(t.due_at)})")
+
+    await update.message.reply_text("📝 Твои задачи:\n" + "\n".join(lines))
+
+
+# ---------------------------
+# /reset_tasks — удалить ВСЕ задачи (и связанные Google-события)
+# ---------------------------
+
+async def reset_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
+    """
+    Удаляет все задачи пользователя.
+    Перед удалением — если подключён Google — удаляем связанные события в календаре.
+    """
+    if not update.message:
+        return
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Не удалось определить пользователя.")
+        return
+
+    try:
+        items = await _run_blocking(_mem.list_tasks, user_id=user.id, status=None, limit=1000, offset=0)
+    except Exception as e:
+        logger.exception("reset_tasks: DB error (list): %s", e)
+        await update.message.reply_text("❌ Ошибка: не удалось получить список задач.")
+        return
+
+    # Проверяем подключение Google
+    try:
+        gc = GoogleCalendarClient(_mem)
+        is_connected = gc.is_connected(user.id)
+    except Exception:
+        is_connected = False
+
+    deleted_count = 0
+
+    if items:
+        for t in items:
+            # если есть связь с событием — удаляем его
+            if is_connected and getattr(t, "calendar_event_id", None):
+                try:
+                    await _run_blocking(gc.delete_event, user.id, t)
+                except Exception as e:
+                    logger.warning("reset_tasks: failed Google event delete for task_id=%s: %s", t.id, e)
+            # удаляем локальную запись
+            try:
+                ok = await _run_blocking(_mem.delete_task, t.id)
+                if ok:
+                    deleted_count += 1
+            except Exception as e:
+                logger.warning("reset_tasks: failed local delete task id=%s: %s", t.id, e)
+
+    await update.message.reply_text(f"🗑 Удалено задач: {deleted_count}")
+
+
+# ---------------------------
+# /complete — отметить задачу выполненной и пометить в календаре
+# ---------------------------
+
+async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
+    """
+    /complete <номер_в_списке> — отмечает задачу как выполненную (status=done)
+    И дополнительно префиксует название задачки «✅ ...», что подтянется в Google через push-синк.
+    """
+    if not update.message:
+        return
+
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Не удалось определить пользователя.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Укажи номер задачи: /complete <номер>")
+        return
+
+    try:
+        idx = int(context.args[0])
     except ValueError:
         await update.message.reply_text("⚠️ Номер задачи должен быть числом.")
         return
 
-    tasks_list = await _mem.list_tasks(user_id=user_id, status="open")
-    if task_num < 1 or task_num > len(tasks_list):
+    try:
+        items = await _run_blocking(_mem.list_tasks, user_id=user.id, status="open", limit=200, offset=0)
+    except Exception as e:
+        logger.exception("complete_task: DB error (list): %s", e)
+        await update.message.reply_text("❌ Ошибка: не удалось получить список задач.")
+        return
+
+    if idx < 1 or idx > len(items):
         await update.message.reply_text("⚠️ Неверный номер задачи.")
         return
 
-    task = tasks_list[task_num - 1]
-    await _mem.update_task(task.id, status="done")
-    log_action(f"User {user_id} завершил задачу: {task.text}")
+    task = items[idx - 1]
+
+    # 1) статус done
+    try:
+        ok = await _run_blocking(_mem.update_task, task.id, status="done")
+        if not ok:
+            await update.message.reply_text("⚠️ Не удалось обновить задачу.")
+            return
+    except Exception as e:
+        logger.exception("complete_task: DB error (update status): %s", e)
+        await update.message.reply_text("❌ Ошибка: не удалось обновить задачу.")
+        return
+
+    # 2) префикс «✅ » в названии (без двойного префикса)
+    try:
+        prefixed = task.text
+        if not prefixed.startswith("✅ "):
+            prefixed = f"✅ {prefixed}"
+        await _run_blocking(_mem.update_task, task.id, text=prefixed)
+    except Exception as e:
+        # не критично — задача уже закрыта; просто лог
+        logger.warning("complete_task: failed to prefix checkmark for task_id=%s: %s", task.id, e)
+
     await update.message.reply_text(f"✅ Задача '{task.text}' отмечена как выполненная.")
