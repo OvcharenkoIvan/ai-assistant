@@ -23,7 +23,12 @@ from bot.commands.voice import voice_on, voice_off, voice_status
 from bot.commands import notes, tasks
 from bot.gpt.chat import chat_with_gpt
 from bot.memory.memory_loader import get_memory
-from bot.core.config import TELEGRAM_TOKEN, OWNER_ID, LOG_LEVEL
+from bot.core.config import TELEGRAM_TOKEN, OWNER_ID as CONFIG_OWNER_ID, LOG_LEVEL
+OWNER_ID = CONFIG_OWNER_ID or 0
+from bot.commands.suggest_plan import suggest_plan
+from bot.commands.today import today_command
+from bot.commands.week import week_command
+
 
 # 🔔 Планировщик (pull-sync Google + дайджесты + бэкапы)
 from bot.scheduler.scheduler import start_scheduler
@@ -59,6 +64,9 @@ voice_keyboard = ReplyKeyboardMarkup(
 
 # --- Инициализация памяти ---
 _mem = get_memory()  # общий адаптер MemorySQLite / InMemory
+from bot.memory.conversation_memory import ConversationMemoryManager
+conv_mem = ConversationMemoryManager(_mem)
+
 
 
 async def send_owner_keyboard(app):
@@ -76,7 +84,7 @@ async def send_owner_keyboard(app):
         logging.error(f"❌ Не удалось отправить клавиатуру владельцу: {e}")
 
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, conv_mem: ConversationMemoryManager):
     """
     1) Если ждём новую дату/время для переноса — обрабатываем и выходим.
     2) Иначе: Smart Capture → GPT.
@@ -90,7 +98,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     handled = await process_intent(update.message)
     if not handled:
-        await chat_with_gpt(update, context)
+        await chat_with_gpt(update, context, conv_mem=conv_mem)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -122,6 +130,9 @@ async def main():
         BotCommand("tasks", "Показать все задачи"),
         BotCommand("reset_tasks", "Удалить все задачи"),
         BotCommand("complete", "Отметить задачу выполненной"),
+        BotCommand("suggest_plan", "Предложить план дня"),
+        BotCommand("today", "Задачи на сегодня"),
+        BotCommand("week", "Задачи на неделю"),
     ])
 
     # --- Ошибки ---
@@ -146,6 +157,14 @@ async def main():
     app.add_handler(CommandHandler("reset_tasks", partial(tasks.reset_tasks, _mem=_mem)))
     app.add_handler(CommandHandler("complete", partial(tasks.complete_task, _mem=_mem)))
 
+    # --- Suggest Plan ---
+    app.add_handler(CommandHandler("suggest_plan", partial(suggest_plan, _mem=_mem)))
+
+    # --- Today ---
+    app.add_handler(CommandHandler("today", partial(today_command, _mem=_mem)))
+    # --- Week ---
+    app.add_handler(CommandHandler("week", partial(week_command, _mem=_mem)))
+
     # --- Голосовые кнопки ---
     app.add_handler(MessageHandler(filters.Regex("^🔊 Включить голос$"), voice_on))
     app.add_handler(MessageHandler(filters.Regex("^🔇 Выключить голос$"), voice_off))
@@ -157,7 +176,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(partial(handle_task_action_callback, _mem=_mem), pattern=r"^task_action:"))
 
     # --- Текстовые сообщения: GPT + Smart Capture ---
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, partial(text_handler, conv_mem=conv_mem)))
+
+
 
     # --- Запуск бота ---
     me = await app.bot.get_me()

@@ -2,10 +2,12 @@
 """
 Production-ready SQLite storage (только логику БД).
 Без импортов Telegram/capture/handlers — чтобы исключить циклы.
-Поддерживает двустороннюю синхронизацию с Google Calendar:
-- расширенная схема tasks (calendar_id, calendar_event_id, etag, google_updated_at, recurrence, person_id, notes, last_modified)
-- таблица oauth_tokens (провайдер, token_json, expiry и метаданные)
-- безопасные миграции, индексы, удобные CRUD-методы.
+Поддерживает:
+- Задачи/заметки (CRUD, индексы)
+- Двустороннюю синхронизацию с Google Calendar (calendar_id, event_id, etag, google_updated_at, recurrence, person_id, notes, last_modified)
+- OAuth токены (oauth_tokens)
+- Разговорную память (conversation_memory, conversation_summary)
+- Безопасные миграции, индексы, вспомогательные методы.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ from typing import Any, Dict, List, Optional, Union, Tuple
 from contextlib import contextmanager
 
 Epoch = int
-# Увеличиваем версию схемы: 4 (ранее было 2 в твоём файле)
-SCHEMA_VERSION = 4
+# ↑ Увеличиваем версию схемы: 5 (ранее было 4)
+SCHEMA_VERSION = 5
 
 
 # -------------------
@@ -40,15 +42,15 @@ class Task:
     source: Optional[str]
     source_agent: Optional[str]
     extra: Optional[Dict[str, Any]]
-    # NEW
-    calendar_id: Optional[str]                 # Google calendarId (можно хранить "primary" или явный id)
-    calendar_event_id: Optional[str]           # Google event.id
-    calendar_event_etag: Optional[str]         # Google event.etag для детекта изменений
-    google_updated_at: Optional[Epoch]         # event.updated → epoch (UTC), для сравнения с локальным
-    recurrence: Optional[str]                  # RRULE или простая метка ('yearly','monthly',...)
-    person_id: Optional[int]                   # связь с человеком в Memory Graph (если есть)
-    notes: Optional[str]                       # дополнительные заметки/контекст по событию
-    last_modified: Epoch                       # локальная «истина» последнего изменения (UTC)
+    # Calendar sync
+    calendar_id: Optional[str]
+    calendar_event_id: Optional[str]
+    calendar_event_etag: Optional[str]
+    google_updated_at: Optional[Epoch]
+    recurrence: Optional[str]
+    person_id: Optional[int]
+    notes: Optional[str]
+    last_modified: Epoch
 
 
 @dataclass
@@ -67,12 +69,34 @@ class Note:
 @dataclass
 class OAuthToken:
     user_id: str
-    provider: str                 # 'google_calendar'
-    token_json: Dict[str, Any]    # сериализованный объект токена
-    expiry: Optional[Epoch]       # момент истечения access_token (UTC)
-    scopes: Optional[str]         # строка scopes (через пробел), опционально
+    provider: str
+    token_json: Dict[str, Any]
+    expiry: Optional[Epoch]
+    scopes: Optional[str]
     created_at: Epoch
     updated_at: Epoch
+
+
+# --- Conversational memory ---
+
+@dataclass
+class ConversationMessage:
+    id: int
+    user_id: int
+    role: str            # 'user' | 'assistant' | 'system'
+    content: str
+    meta_json: Optional[Dict[str, Any]]
+    ts_epoch: Epoch      # время сообщения (UTC)
+    created_at: Epoch
+    updated_at: Epoch
+
+
+@dataclass
+class ConversationSummary:
+    user_id: int
+    summary_text: str
+    updated_at: Epoch
+    created_at: Epoch
 
 
 # -------------------
@@ -81,7 +105,7 @@ class OAuthToken:
 
 class MemorySQLite:
     """
-    SQLite-backed storage for tasks and notes + calendar sync + oauth tokens.
+    SQLite-backed storage for tasks and notes + calendar sync + oauth tokens + conversational memory.
     """
 
     def __init__(self, db_path: Union[str, Path] = ":memory:") -> None:
@@ -93,11 +117,11 @@ class MemorySQLite:
         con = sqlite3.connect(
             self.db_path,
             detect_types=sqlite3.PARSE_DECLTYPES,
-            isolation_level=None,
+            isolation_level=None,         # autocommit mode
             check_same_thread=False,
         )
         try:
-            # Надёжные параметры для продакшена (WAL + нормальный sync)
+            # Продакшен-параметры
             con.execute("PRAGMA journal_mode=WAL;")
             con.execute("PRAGMA synchronous=NORMAL;")
             con.execute("PRAGMA foreign_keys=ON;")
@@ -135,7 +159,15 @@ class MemorySQLite:
                     updated_at INTEGER NOT NULL,
                     source TEXT,
                     source_agent TEXT,
-                    extra TEXT
+                    extra TEXT,
+                    calendar_id TEXT,
+                    calendar_event_id TEXT,
+                    calendar_event_etag TEXT,
+                    google_updated_at INTEGER,
+                    recurrence TEXT,
+                    person_id INTEGER,
+                    notes TEXT,
+                    last_modified INTEGER
                 );
             """)
             cur.execute("""
@@ -166,6 +198,28 @@ class MemorySQLite:
                 );
             """)
 
+            # --- Conversational memory tables (новое в v5)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+                    content TEXT NOT NULL,
+                    meta_json TEXT,
+                    ts_epoch INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_summary (
+                    user_id INTEGER PRIMARY KEY,
+                    summary_text TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+            """)
+
             self._migrate(con)
             self._ensure_indexes(con)
 
@@ -175,12 +229,15 @@ class MemorySQLite:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user_due ON tasks(user_id, due_at);")
-        # NEW: calendar-related
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_calendar_link ON tasks(user_id, calendar_id, calendar_event_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_last_modified ON tasks(last_modified);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_google_updated ON tasks(google_updated_at);")
         # oauth indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_oauth_provider ON oauth_tokens(provider);")
+        # conversational memory indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_user_ts ON conversation_memory(user_id, ts_epoch);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cm_user_role ON conversation_memory(user_id, role);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cs_user ON conversation_summary(user_id);")
 
     def _get_version(self, con: sqlite3.Connection) -> int:
         cur = con.cursor()
@@ -196,46 +253,72 @@ class MemorySQLite:
         cur.execute(f"PRAGMA table_info({table});")
         return any(row[1] == column for row in cur.fetchall())
 
+    def _table_exists(self, con: sqlite3.Connection, table: str) -> bool:
+        cur = con.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table,))
+        return cur.fetchone() is not None
+
     def _migrate(self, con: sqlite3.Connection) -> None:
         """
-        Акуратно добавляем недостающие столбцы для продакшен-синхронизации календаря.
+        Акуратно добавляем недостающие столбцы/таблицы.
         """
         current = self._get_version(con)
 
-        # v1: due_at
+        # v1: due_at для tasks (историческое)
         if not self._column_exists(con, "tasks", "due_at"):
             con.execute("ALTER TABLE tasks ADD COLUMN due_at INTEGER;")
             current = max(current, 1)
 
-        # v3: calendar & recurrence fields (пропускаем v2 как исторический)
+        # v3: calendar & recurrence fields (если вдруг какая-то колонка отсутствует)
         columns_to_add: List[Tuple[str, str]] = []
-        if not self._column_exists(con, "tasks", "calendar_id"):
-            columns_to_add.append(("calendar_id", "TEXT"))
-        if not self._column_exists(con, "tasks", "calendar_event_id"):
-            columns_to_add.append(("calendar_event_id", "TEXT"))
-        if not self._column_exists(con, "tasks", "calendar_event_etag"):
-            columns_to_add.append(("calendar_event_etag", "TEXT"))
-        if not self._column_exists(con, "tasks", "google_updated_at"):
-            columns_to_add.append(("google_updated_at", "INTEGER"))
-        if not self._column_exists(con, "tasks", "recurrence"):
-            columns_to_add.append(("recurrence", "TEXT"))
-        if not self._column_exists(con, "tasks", "person_id"):
-            columns_to_add.append(("person_id", "INTEGER"))
-        if not self._column_exists(con, "tasks", "notes"):
-            columns_to_add.append(("notes", "TEXT"))
-        if not self._column_exists(con, "tasks", "last_modified"):
-            columns_to_add.append(("last_modified", "INTEGER"))
-
+        for col, typ in (
+            ("calendar_id", "TEXT"),
+            ("calendar_event_id", "TEXT"),
+            ("calendar_event_etag", "TEXT"),
+            ("google_updated_at", "INTEGER"),
+            ("recurrence", "TEXT"),
+            ("person_id", "INTEGER"),
+            ("notes", "TEXT"),
+            ("last_modified", "INTEGER"),
+        ):
+            if not self._column_exists(con, "tasks", col):
+                columns_to_add.append((col, typ))
         for col, typ in columns_to_add:
             con.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ};")
-
         if columns_to_add:
-            # Инициализируем last_modified для существующих строк значением updated_at
+            # Инициализация last_modified
             if any(col == "last_modified" for col, _ in columns_to_add):
                 con.execute("UPDATE tasks SET last_modified = COALESCE(updated_at, strftime('%s','now'));")
             current = max(current, 3)
 
-        # v4: oauth_tokens уже создавалась выше через IF NOT EXISTS, а тут просто фиксируем версию
+        # v4: oauth_tokens уже создавалась в init_db
+
+        # v5: conversational memory tables (если не существуют — создать)
+        if not self._table_exists(con, "conversation_memory"):
+            con.execute("""
+                CREATE TABLE conversation_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
+                    content TEXT NOT NULL,
+                    meta_json TEXT,
+                    ts_epoch INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+            """)
+        if not self._table_exists(con, "conversation_summary"):
+            con.execute("""
+                CREATE TABLE conversation_summary (
+                    user_id INTEGER PRIMARY KEY,
+                    summary_text TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+            """)
+        # Индексы (на случай апгрейда)
+        self._ensure_indexes(con)
+
         if current < SCHEMA_VERSION:
             self._set_version(con, SCHEMA_VERSION)
 
@@ -287,7 +370,6 @@ class MemorySQLite:
         source: Optional[str] = None,
         source_agent: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
-        # NEW
         recurrence: Optional[str] = None,
         person_id: Optional[int] = None,
         notes: Optional[str] = None,
@@ -295,7 +377,7 @@ class MemorySQLite:
         created = updated = self._now_epoch()
         due = self._to_epoch(due_at)
         extra_json = self._dumps_optional_json(extra)
-        last_modified = updated  # локальная истина изменения
+        last_modified = updated
         with self._connect() as con:
             cur = con.cursor()
             cur.execute(
@@ -480,9 +562,6 @@ class MemorySQLite:
         event_etag: Optional[str] = None,
         google_updated_at: Optional[Union[int, float]] = None,
     ) -> bool:
-        """
-        Привязать локальную задачу к событию в Google Calendar.
-        """
         sets = [
             "calendar_id=?",
             "calendar_event_id=?",
@@ -497,7 +576,6 @@ class MemorySQLite:
             self._to_epoch(google_updated_at),
             self._now_epoch(),
         ]
-        # Привязка сама по себе не меняет локальную last_modified, это техническое действие:
         sql = f"UPDATE tasks SET {', '.join(sets)} WHERE id=?;"
         params.append(task_id)
         with self._connect() as con:
@@ -541,9 +619,6 @@ class MemorySQLite:
             return self._task_from_row(r) if r else None
 
     def list_tasks_missing_calendar_link(self, user_id: int) -> List[Task]:
-        """
-        Локальные задачи без привязки к календарю (кандидаты на создание events.insert).
-        """
         with self._connect() as con:
             cur = con.cursor()
             cur.execute(
@@ -561,9 +636,6 @@ class MemorySQLite:
             return [self._task_from_row(r) for r in cur.fetchall()]
 
     def list_tasks_modified_since(self, ts_epoch: int, user_id: Optional[int] = None) -> List[Task]:
-        """
-        Локально изменённые задачи с момента ts_epoch (для push-обновлений в Google).
-        """
         with self._connect() as con:
             cur = con.cursor()
             clauses = ["last_modified > ?"]
@@ -587,9 +659,6 @@ class MemorySQLite:
             return [self._task_from_row(r) for r in cur.fetchall()]
 
     def mark_task_locally_modified(self, task_id: int) -> bool:
-        """
-        Явно отметить локальное изменение (например, после «перенести/отложить»)
-        """
         now = self._now_epoch()
         with self._connect() as con:
             cur = con.cursor()
@@ -698,10 +767,6 @@ class MemorySQLite:
         expiry: Optional[Union[int, float]] = None,
         scopes: Optional[List[str]] = None,
     ) -> None:
-        """
-        Сохранить/обновить OAuth-токен.
-        Хранится как JSON, expiry — epoch (UTC), scopes — строка (через пробел).
-        """
         now = self._now_epoch()
         scopes_str = " ".join(scopes) if scopes else None
         token_blob = self._dumps_optional_json(token_json) or "{}"
@@ -752,6 +817,151 @@ class MemorySQLite:
             return cur.rowcount > 0
 
     # -------------------
+    # Conversational Memory (messages + summary)
+    # -------------------
+
+    def add_conversation_message(
+        self,
+        user_id: int,
+        role: str,
+        content: str,
+        *,
+        meta_json: Optional[Dict[str, Any]] = None,
+        ts_epoch: Optional[Union[int, float]] = None,
+    ) -> int:
+        now = self._now_epoch()
+        ts = self._to_epoch(ts_epoch) or now
+        meta_blob = self._dumps_optional_json(meta_json)
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                INSERT INTO conversation_memory (user_id, role, content, meta_json, ts_epoch, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?);
+                """,
+                (user_id, role, content, meta_blob, ts, now, now),
+            )
+            return int(cur.lastrowid)
+
+    def list_conversation_messages(
+        self,
+        user_id: int,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        roles: Optional[List[str]] = None,
+        order: str = "asc",  # 'asc' | 'desc' по ts_epoch
+    ) -> List[ConversationMessage]:
+        order_sql = "ASC" if order.lower() == "asc" else "DESC"
+        with self._connect() as con:
+            cur = con.cursor()
+            clauses = ["user_id=?"]
+            params: List[Any] = [user_id]
+            if roles:
+                placeholders = ",".join("?" for _ in roles)
+                clauses.append(f"role IN ({placeholders})")
+                params.extend(roles)
+            where = "WHERE " + " AND ".join(clauses)
+            cur.execute(
+                f"""
+                SELECT id, user_id, role, content, meta_json, ts_epoch, created_at, updated_at
+                FROM conversation_memory
+                {where}
+                ORDER BY ts_epoch {order_sql}
+                LIMIT ? OFFSET ?;
+                """,
+                (*params, int(limit), int(offset)),
+            )
+            rows = cur.fetchall()
+            out: List[ConversationMessage] = []
+            for r in rows:
+                out.append(
+                    ConversationMessage(
+                        id=r[0], user_id=r[1], role=r[2], content=r[3],
+                        meta_json=self._loads_optional_json(r[4]),
+                        ts_epoch=r[5], created_at=r[6], updated_at=r[7],
+                    )
+                )
+            return out
+
+    def prune_conversation_history(self, user_id: int, keep_last: int = 50) -> int:
+        """
+        Оставить только последние keep_last сообщений по ts_epoch.
+        Возвращает количество удалённых строк.
+        """
+        with self._connect() as con:
+            cur = con.cursor()
+            # Найти порог ts по смещению
+            cur.execute(
+                """
+                SELECT ts_epoch FROM conversation_memory
+                WHERE user_id=?
+                ORDER BY ts_epoch DESC
+                LIMIT 1 OFFSET ?;
+                """,
+                (user_id, max(keep_last - 1, 0)),
+            )
+            row = cur.fetchone()
+            if not row:
+                return 0  # ничего не удаляем
+
+            threshold_ts = row[0]
+            cur.execute(
+                """
+                DELETE FROM conversation_memory
+                WHERE user_id=? AND ts_epoch < ?;
+                """,
+                (user_id, threshold_ts),
+            )
+            return cur.rowcount or 0
+
+    def set_conversation_summary(self, user_id: int, summary_text: str) -> None:
+        now = self._now_epoch()
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                INSERT INTO conversation_summary (user_id, summary_text, updated_at, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    summary_text=excluded.summary_text,
+                    updated_at=excluded.updated_at;
+                """,
+                (user_id, summary_text, now, now),
+            )
+
+    def get_conversation_summary(self, user_id: int) -> Optional[ConversationSummary]:
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT user_id, summary_text, updated_at, created_at
+                FROM conversation_summary
+                WHERE user_id=?;
+                """,
+                (user_id,),
+            )
+            r = cur.fetchone()
+            if not r:
+                return None
+            return ConversationSummary(
+                user_id=r[0], summary_text=r[1], updated_at=r[2], created_at=r[3]
+            )
+
+    def delete_conversation_history(self, user_id: int) -> int:
+        """
+        Полная очистка истории и саммари пользователя.
+        Возвращает количество удалённых сообщений (summary удаляется отдельно).
+        """
+        deleted = 0
+        with self._connect() as con:
+            cur = con.cursor()
+            cur.execute("DELETE FROM conversation_memory WHERE user_id=?;", (user_id,))
+            deleted = cur.rowcount or 0
+            cur.execute("DELETE FROM conversation_summary WHERE user_id=?;", (user_id,))
+        return deleted
+
+    # -------------------
     # Maintenance
     # -------------------
 
@@ -761,6 +971,8 @@ class MemorySQLite:
             cur.execute("DROP TABLE IF EXISTS tasks;")
             cur.execute("DROP TABLE IF EXISTS notes;")
             cur.execute("DROP TABLE IF EXISTS oauth_tokens;")
+            cur.execute("DROP TABLE IF EXISTS conversation_memory;")
+            cur.execute("DROP TABLE IF EXISTS conversation_summary;")
             cur.execute("DROP TABLE IF EXISTS schema_version;")
             con.execute("VACUUM;")
         self.init_db()
@@ -769,3 +981,4 @@ class MemorySQLite:
         with self._connect() as con:
             con.execute("VACUUM;")
 # End of memory_sqlite.py
+# bot/core/secure_tokens.py

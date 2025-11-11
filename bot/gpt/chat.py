@@ -17,7 +17,9 @@ from bot.search.web import web_search, render_results_for_prompt
 
 logger = logging.getLogger(__name__)
 
-# --- Ключевые слова для web search ---
+# ------------------------------
+#  Ключевые слова для web search
+# ------------------------------
 WEB_KEYWORDS = [
     "сейчас", "сегодня", "новости", "последние", "актуальные",
     "кто", "кто руководит",
@@ -29,7 +31,9 @@ WEB_KEYWORDS = [
     "матч", "счёт", "турнир", "чемпионат", "лига", "результат",
 ]
 
-# --- Определяем режим GPT ---
+# ------------------------------
+#  Определяем режим GPT
+# ------------------------------
 def detect_mode(user_text: str) -> str:
     """
     Возвращает один из режимов: "tasks" | "notes" | "default".
@@ -52,7 +56,9 @@ def detect_mode(user_text: str) -> str:
         return "notes"
     return "default"
 
-# --- Строим список сообщений для GPT с web-контекстом ---
+# ------------------------------
+#  Конструктор сообщений GPT
+# ------------------------------
 def build_messages(user_id: int, user_text: str, web_text: str = "", mode: str = "default"):
     """
     Формирует system + user для GPT с учётом режима:
@@ -83,7 +89,9 @@ def build_messages(user_id: int, user_text: str, web_text: str = "", mode: str =
         {"role": "user", "content": user_content},
     ]
 
-# --- Эвристика web search ---
+# ------------------------------
+#  Web search trigger
+# ------------------------------
 def needs_web_search(user_text: str) -> bool:
     text = (user_text or "").lower()
     for kw in WEB_KEYWORDS:
@@ -93,8 +101,17 @@ def needs_web_search(user_text: str) -> bool:
         return True
     return False
 
-# --- Основной обработчик Telegram ---
-async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ------------------------------
+#  Основной обработчик GPT-диалога
+# ------------------------------
+async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE, conv_mem=None) -> None:
+    """
+    Основной обработчик сообщений Telegram:
+    - детектирует режим
+    - опционально делает web search
+    - вызывает GPT (ask_gpt)
+    - сохраняет контекст в разговорную память
+    """
     if not update.message or not update.message.text:
         return
     if update.message.text.startswith("/"):
@@ -108,8 +125,10 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("⚠️ GPT не настроен (нет ключа API).")
         return
 
-    mode = detect_mode(text)  # <-- выбор режима GPT
+    # --- Определяем режим ---
+    mode = detect_mode(text)
 
+    # --- При необходимости делаем web search ---
     web_text = ""
     if AUTO_WEB and needs_web_search(text):
         try:
@@ -137,18 +156,59 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             logger.warning("Web search failed: %s", e)
 
+    # --- Работа с разговорной памятью ---
+    mem_ctx: List[Dict[str, str]] = []
+    if conv_mem is not None:
+        try:
+            conv_mem.add_message(user_id, "user", text)
+            mem_ctx = conv_mem.build_prompt_context(user_id)
+        except Exception as e:
+            logger.warning("Ошибка при работе с разговорной памятью: %s", e)
+
+    # --- Подготовка сообщений для GPT ---
+    base_messages = build_messages(user_id, text, web_text, mode=mode)
+    system_msg = base_messages[0]
+    final_user_msg = base_messages[-1]
+
+    # Собираем итоговый контекст: system + memory + user
+    messages = [system_msg] + mem_ctx + [final_user_msg]
+
+    # --- Основной запрос к GPT ---
     try:
-        messages = build_messages(user_id, text, web_text, mode=mode)
         reply = await ask_gpt(messages)
         logger.info("GPT ответ пользователю %s: %r", user_id, (reply[:120] if reply else reply))
 
         await update.message.reply_text(reply)
 
+        # --- Сохраняем ответ ассистента ---
+        if conv_mem is not None:
+            try:
+                conv_mem.add_message(user_id, "assistant", reply)
+            except Exception:
+                logger.exception("Ошибка при сохранении ответа ассистента в память")
+
+        # --- Опционально озвучка ---
         if should_send_voice_now(user_id):
             try:
                 await synthesize_and_send_voice(update, reply)
             except Exception:
                 logger.exception("Ошибка TTS при ответе на текстовое сообщение")
+
+        # --- Обновление краткой summary при длинной истории ---
+        if conv_mem is not None and hasattr(conv_mem, "should_update_summary") and conv_mem.should_update_summary(user_id):
+            try:
+                async def _ask(messages, model=None, temperature=0.2, max_tokens=300):
+                    return await ask_gpt(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+
+                def _ask_sync(messages, model=None, temperature=0.2, max_tokens=300):
+                    import asyncio
+                    return asyncio.get_event_loop().run_until_complete(
+                        _ask(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+                    )
+
+                conv_mem.update_summary_via_gpt(user_id, _ask_sync)
+            except Exception:
+                logger.warning("Не удалось обновить summary")
 
     except Exception as e:
         logger.exception("Ошибка GPT при обработке сообщения")
