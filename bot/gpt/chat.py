@@ -1,4 +1,6 @@
+# bot/gpt/chat.py
 from __future__ import annotations
+
 import asyncio
 import inspect
 import logging
@@ -8,7 +10,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.core.config import AUTO_WEB, SEARCH_LOCALE, SEARCH_COUNTRY
-from bot.gpt.client import ask_gpt, is_configured
+from bot.gpt.client import ask_gpt, is_configured, _ask_gpt_sync
 from bot.gpt.prompt import get_core_prompt, get_tasks_prompt, get_notes_prompt
 from bot.gpt.translate import translate_text
 from bot.voice.state import should_send_voice_now
@@ -43,18 +45,38 @@ def detect_mode(user_text: str) -> str:
     """
     t = (user_text or "").lower()
 
-    task_hits = any(kw in t for kw in [
-        "задач", "напомни", "напомните", "сделать", "сделай", "todo", "to do", "дедлайн", "план"
-    ])
-    note_hits = any(kw in t for kw in [
-        "заметк", "запиши", "сохрани", "идея", "мысл", "пометка"
-    ])
+    task_hits = any(
+        kw in t
+        for kw in [
+            "задач",
+            "напомни",
+            "напомните",
+            "сделать",
+            "сделай",
+            "todo",
+            "to do",
+            "дедлайн",
+            "план",
+        ]
+    )
+    note_hits = any(
+        kw in t
+        for kw in [
+            "заметк",
+            "запиши",
+            "сохрани",
+            "идея",
+            "мысл",
+            "пометка",
+        ]
+    )
 
     if task_hits and not note_hits:
         return "tasks"
     if note_hits and not task_hits:
         return "notes"
     return "default"
+
 
 # ------------------------------
 #  Конструктор сообщений GPT
@@ -89,6 +111,7 @@ def build_messages(user_id: int, user_text: str, web_text: str = "", mode: str =
         {"role": "user", "content": user_content},
     ]
 
+
 # ------------------------------
 #  Web search trigger
 # ------------------------------
@@ -97,9 +120,11 @@ def needs_web_search(user_text: str) -> bool:
     for kw in WEB_KEYWORDS:
         if kw in text:
             return True
+    # Очень короткий вопрос со знаком вопроса — тоже кандидат на web search
     if len(text.split()) <= 5 and text.endswith("?"):
         return True
     return False
+
 
 # ------------------------------
 #  Основной обработчик GPT-диалога
@@ -107,8 +132,9 @@ def needs_web_search(user_text: str) -> bool:
 async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE, conv_mem=None) -> None:
     """
     Основной обработчик сообщений Telegram:
-    - детектирует режим
+    - детектирует режим (tasks/notes/default)
     - опционально делает web search
+    - собирает контекст (summary + история) через conv_mem
     - вызывает GPT (ask_gpt)
     - сохраняет контекст в разговорную память
     """
@@ -160,7 +186,9 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE, conv
     mem_ctx: List[Dict[str, str]] = []
     if conv_mem is not None:
         try:
+            # сначала сохраняем входящее сообщение
             conv_mem.add_message(user_id, "user", text)
+            # строим контекст (summary + последние сообщения)
             mem_ctx = conv_mem.build_prompt_context(user_id)
         except Exception as e:
             logger.warning("Ошибка при работе с разговорной памятью: %s", e)
@@ -194,21 +222,21 @@ async def chat_with_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE, conv
             except Exception:
                 logger.exception("Ошибка TTS при ответе на текстовое сообщение")
 
-        # --- Обновление краткой summary при длинной истории ---
-        if conv_mem is not None and hasattr(conv_mem, "should_update_summary") and conv_mem.should_update_summary(user_id):
+        # --- Обновление summary в фоне, если пора ---
+        if conv_mem is not None and hasattr(conv_mem, "should_update_summary"):
             try:
-                async def _ask(messages, model=None, temperature=0.2, max_tokens=300):
-                    return await ask_gpt(messages, model=model, temperature=temperature, max_tokens=max_tokens)
-
-                def _ask_sync(messages, model=None, temperature=0.2, max_tokens=300):
-                    import asyncio
-                    return asyncio.get_event_loop().run_until_complete(
-                        _ask(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+                if conv_mem.should_update_summary(user_id):
+                    # Запускаем обновление summary в отдельном потоке,
+                    # чтобы не блокировать обработку сообщений бота.
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            conv_mem.update_summary_via_gpt,
+                            user_id,
+                            _ask_gpt_sync,
+                        )
                     )
-
-                conv_mem.update_summary_via_gpt(user_id, _ask_sync)
             except Exception:
-                logger.warning("Не удалось обновить summary")
+                logger.warning("Не удалось запустить обновление summary", exc_info=True)
 
     except Exception as e:
         logger.exception("Ошибка GPT при обработке сообщения")

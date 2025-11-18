@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -9,8 +10,11 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from zoneinfo import ZoneInfo
 
 from bot.core.config import (
-    TZ, SYNC_INTERVAL_MINUTES, JOBSTORE_DB_PATH,
-    BACKUP_ENABLED, INSTANCE_NAME,
+    TZ,
+    SYNC_INTERVAL_MINUTES,
+    JOBSTORE_DB_PATH,
+    BACKUP_ENABLED,
+    INSTANCE_NAME,
 )
 from .jobs import (
     run_google_pull_and_schedule,
@@ -28,6 +32,9 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 def get_scheduler() -> AsyncIOScheduler:
+    """
+    Инициализация APScheduler с постоянным jobstore (SQLite).
+    """
     global _scheduler
     if _scheduler is None:
         jobstores = {"default": SQLAlchemyJobStore(url=f"sqlite:///{JOBSTORE_DB_PATH}")}
@@ -36,7 +43,9 @@ def get_scheduler() -> AsyncIOScheduler:
 
 
 async def build_gpt_tomorrow_summary(mem, user_id: int) -> str:
-    """Краткая GPT-сводка по приоритетам на завтра."""
+    """
+    Краткая GPT-сводка по приоритетам на завтра.
+    """
     try:
         tasks = mem.list_tasks(user_id=user_id, status="open", limit=50, offset=0)
     except Exception as e:
@@ -67,9 +76,18 @@ async def build_gpt_tomorrow_summary(mem, user_id: int) -> str:
 
 
 def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
+    """
+    Регистрирует периодические задачи и запускает планировщик:
+      - Пулл-синк Google каждые SYNC_INTERVAL_MINUTES
+      - Утренний брифинг (08:00)
+      - Вечерний дайджест просроченных (20:00)
+      - Вечерний дайджест + GPT-сводка (21:00)
+      - Health ping каждый час
+      - Ночной бэкап SQLite-БД (если включен)
+    """
     sched = get_scheduler()
 
-    # Google pull-sync
+    # --- Google pull-sync ---
     sched.add_job(
         run_google_pull_and_schedule,
         trigger=IntervalTrigger(minutes=SYNC_INTERVAL_MINUTES),
@@ -80,7 +98,7 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Утренний брифинг 08:00
+    # --- Утренний брифинг 08:00 ---
     sched.add_job(
         morning_briefing,
         trigger=CronTrigger(hour=8, minute=0),
@@ -91,7 +109,7 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Просрочки 20:00
+    # --- Вечерний дайджест просроченных (20:00) ---
     sched.add_job(
         send_overdue_digest,
         trigger=CronTrigger(hour=20, minute=0),
@@ -102,7 +120,7 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Вечерний дайджест + GPT-сводка 21:00
+    # --- Вечерний дайджест + GPT-сводка (21:00) ---
     async def daily_digest_with_gpt(app, mem, owner_id):
         try:
             await send_daily_digest(app, mem, owner_id)
@@ -124,7 +142,7 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Health-ping
+    # --- Health ping ---
     sched.add_job(
         health_ping,
         trigger=IntervalTrigger(hours=1),
@@ -135,7 +153,7 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
         max_instances=1,
     )
 
-    # Бэкап (если включён)
+    # --- Ночной бэкап SQLite (если включён) ---
     if BACKUP_ENABLED:
         schedule_sqlite_backup_job(sched)
 
@@ -144,4 +162,3 @@ def start_scheduler(app, _mem, owner_user_id: int) -> AsyncIOScheduler:
 
     logger.info("🗓 Scheduler started for %s", INSTANCE_NAME)
     return sched
-    hh, mm = 2, 0  # Время бэкапа каждый день в 02:00
