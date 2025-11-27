@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Tuple
 from contextlib import contextmanager
+from bot.core.secure_tokens import encrypt_dict, decrypt_dict
 
 Epoch = int
 # ↑ Увеличиваем версию схемы: 5 (ранее было 4)
@@ -767,9 +768,16 @@ class MemorySQLite:
         expiry: Optional[Union[int, float]] = None,
         scopes: Optional[List[str]] = None,
     ) -> None:
+        """
+        Сохраняет OAuth-токен в таблицу oauth_tokens.
+        token_json хранится в зашифрованном виде (через encrypt_dict).
+        """
         now = self._now_epoch()
-        scopes_str = " ".join(scopes) if scopes else None
-        token_blob = self._dumps_optional_json(token_json) or "{}"
+        scopes_str = ",".join(scopes) if scopes else None
+
+        # 🔒 Шифруем dict → строка
+        token_blob = encrypt_dict(token_json)
+
         with self._connect() as con:
             cur = con.cursor()
             cur.execute(
@@ -786,6 +794,10 @@ class MemorySQLite:
             )
 
     def get_oauth_token(self, user_id: str, provider: str) -> Optional[OAuthToken]:
+        """
+        Читает OAuth-токен из oauth_tokens и расшифровывает поле token_json.
+        Старые записи с обычным JSON тоже корректно прочитаются (decrypt_dict сам разрулит).
+        """
         with self._connect() as con:
             cur = con.cursor()
             cur.execute(
@@ -800,15 +812,20 @@ class MemorySQLite:
             r = cur.fetchone()
             if not r:
                 return None
+
+            # 🔓 Расшифровываем строку -> dict
+            token_dict = decrypt_dict(r[2]) if r[2] else {}
+
             return OAuthToken(
                 user_id=r[0],
                 provider=r[1],
-                token_json=json.loads(r[2]) if r[2] else {},
+                token_json=token_dict,
                 expiry=r[3],
                 scopes=r[4],
                 created_at=r[5],
                 updated_at=r[6],
             )
+
 
     def delete_oauth_token(self, user_id: str, provider: str) -> bool:
         with self._connect() as con:

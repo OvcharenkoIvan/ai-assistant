@@ -1,4 +1,3 @@
-# bot/scheduler/jobs.py
 from __future__ import annotations
 
 import asyncio
@@ -21,44 +20,57 @@ from bot.core.config import (
 )
 from bot.integrations.google_calendar import GoogleCalendarClient
 from bot.commands.task_actions import build_task_actions_kb
-from bot.gpt.client import ask_gpt
 
 logger = logging.getLogger(__name__)
 
 
 # ----------------------- Утилиты -----------------------
 
+
 async def _run_blocking(func, *args, **kwargs):
+    """
+    Запустить блокирующую функцию в thread pool из async-кода.
+    """
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 # ----------------------- Напоминания -----------------------
 
+
 async def send_task_reminder(app, _mem, user_id: int, task_id: int) -> None:
-    job_name = "send_task_reminder"
+    """
+    Разовое напоминание по задаче.
+    Отправляет текст + те же кнопки действий, что и в списках задач.
+    """
     try:
         t = await _run_blocking(_mem.get_task, task_id)
         if not t or not t.due_at:
             return
+
         chat_id = user_id
-        when = datetime.fromtimestamp(t.due_at, tz=ZoneInfo(TZ)).strftime("%Y-%m-%d %H:%M")
+        tz = ZoneInfo(TZ)
+        when = datetime.fromtimestamp(t.due_at, tz=tz).strftime("%Y-%m-%d %H:%M")
         suffix = " (весь день)" if (getattr(t, "extra", None) or {}).get("all_day") else ""
         text = f"⏰ Напоминание: {t.text}{suffix}\nВремя: {when}"
-        await app.bot.send_message(chat_id=chat_id, text=text)
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+
+        await app.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=build_task_actions_kb(t.id),
+        )
+    except Exception:
+        logger.exception("send_task_reminder: failed")
+
 
 
 # ----------------------- Утренний брифинг -----------------------
 
+
 async def morning_briefing(app, _mem, user_id: int) -> None:
     """
-    08:00 — показать краткий план на сегодня:
-      - задачи на день
-      - события из календаря (если подключен)
+    08:00 — показать краткий план на сегодня карточками с кнопками действий.
     """
-    job_name = "morning_briefing"
     try:
         tz = ZoneInfo(TZ)
         now = datetime.now(tz)
@@ -77,28 +89,46 @@ async def morning_briefing(app, _mem, user_id: int) -> None:
         if not upcoming:
             await app.bot.send_message(
                 chat_id=user_id,
-                text="🌅 Доброе утро!\nНа сегодня задач нет. Отличного дня!",
+                text="🌅 Доброе утро!\nНа сегодня задач нет. Отличного дня! 👌",
             )
             return
 
-        lines = ["🌅 Доброе утро! Вот твои задачи на сегодня:"]
+        # Шапка-обзор
+        await app.bot.send_message(
+            chat_id=user_id,
+            text=f"🌅 Доброе утро!\nВот твои задачи на сегодня ({len(upcoming)}):",
+        )
+
+        # Карточки по задачам с action-кнопками
         for t in upcoming:
             when = (
                 datetime.fromtimestamp(t.due_at, tz=tz).strftime("%H:%M")
                 if t.due_at
                 else "—"
             )
-            lines.append(f"🕒 [{t.id}] {t.text} — {when}")
+            caption = f"🕒 {when} — {t.text}\n[id: {t.id}]"
+            try:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=caption,
+                    reply_markup=build_task_actions_kb(t.id),
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.warning("morning_briefing: failed to send task id=%s", t.id, exc_info=True)
 
-        await app.bot.send_message(chat_id=user_id, text="\n".join(lines))
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.exception("morning_briefing failed")
 
 
-# ----------------------- План на завтра (список) -----------------------
+
+# ----------------------- План на завтра (сырые задачи) -----------------------
+
 
 async def send_daily_digest(app, _mem, user_id: int) -> None:
-    job_name = "send_daily_digest"
+    """
+    Вечерний дайджест задач на завтра (карточками с кнопками действий).
+    """
     try:
         tz = ZoneInfo(TZ)
         now = datetime.now(tz)
@@ -114,79 +144,44 @@ async def send_daily_digest(app, _mem, user_id: int) -> None:
             limit=100,
         )
         if not upcoming:
+            # если на завтра ничего нет — можно молча промолчать
             return
 
-        lines = ["🗓 План на завтра:"]
+        date_label = start.strftime("%Y-%m-%d")
+        await app.bot.send_message(
+            chat_id=user_id,
+            text=f"🗓 План на завтра ({date_label}) — {len(upcoming)} задач(и):",
+        )
+
         for t in upcoming:
             when = (
                 datetime.fromtimestamp(t.due_at, tz=tz).strftime("%H:%M")
                 if t.due_at
                 else "—"
             )
-            lines.append(f"🕒 [{t.id}] {t.text} — {when}")
+            caption = f"🕒 {when} — {t.text}\n[id: {t.id}]"
+            try:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=caption,
+                    reply_markup=build_task_actions_kb(t.id),
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                logger.warning("send_daily_digest: failed to send task id=%s", t.id, exc_info=True)
 
-        await app.bot.send_message(chat_id=user_id, text="\n".join(lines))
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.exception("send_daily_digest failed")
 
-
-# ----------------------- GPT-сводка на завтра -----------------------
-
-async def build_gpt_tomorrow_summary(_mem, user_id: int) -> str:
-    """
-    Краткая GPT-сводка по приоритетам на завтра.
-    Вызывается из daily_digest_with_gpt.
-    """
-    try:
-        tasks = _mem.list_tasks(user_id=user_id, status="open", limit=50, offset=0)
-    except Exception as e:
-        logger.exception("GPT summary: DB error: %s", e)
-        return "⚠️ Ошибка при получении задач."
-
-    if not tasks:
-        return "На завтра открытых задач нет."
-
-    lines = [f"- {t.text} | срок: {getattr(t, 'due_at', '—')}" for t in tasks]
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Ты ассистент-планировщик. Выдели 3–5 приоритетов на завтра, "
-                "не повторяя весь список. Кратко и по делу."
-            ),
-        },
-        {"role": "user", "content": "Список задач:\n" + "\n".join(lines)},
-    ]
-
-    try:
-        summary = await ask_gpt(messages)
-        return summary.strip() if summary else "GPT не дал ответа."
-    except Exception as e:
-        logger.exception("GPT summary generation failed: %s", e)
-        return "⚠️ Ошибка при построении GPT-сводки."
-
-
-async def daily_digest_with_gpt(app, _mem, user_id: int) -> None:
-    """
-    Вечерний дайджест + GPT-сводка приоритетов на завтра.
-    Запускается в 21:00 по крону.
-    """
-    job_name = "daily_digest_with_gpt"
-    try:
-        await send_daily_digest(app, _mem, user_id)
-        summary = await build_gpt_tomorrow_summary(_mem, user_id)
-        await app.bot.send_message(
-            chat_id=user_id,
-            text=f"🤖 GPT-сводка на завтра:\n{summary}",
-        )
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
 
 
 # ----------------------- Просроченные задачи -----------------------
 
+
 async def send_overdue_digest(app, _mem, user_id: int) -> None:
-    job_name = "send_overdue_digest"
+    """
+    Вечерний дайджест просроченных задач.
+    """
     try:
         tz = ZoneInfo(TZ)
         now_epoch = int(datetime.now(tz).timestamp())
@@ -216,32 +211,38 @@ async def send_overdue_digest(app, _mem, user_id: int) -> None:
                 await app.bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
             except Exception:
                 logger.warning("send_overdue_digest: item send failed", exc_info=True)
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.exception("send_overdue_digest failed")
 
 
 # ----------------------- Google Pull + Напоминания -----------------------
 
+
 async def run_google_pull_and_schedule(app, _mem, user_id: int, scheduler) -> None:
-    job_name = "run_google_pull_and_schedule"
+    """
+    Пулл-синк из Google Calendar + постановка напоминаний.
+    """
     try:
         gc = GoogleCalendarClient(_mem)
         if not gc.is_connected(user_id):
             return
-        res = await _run_blocking(gc.sync_pull, user_id)
-        tz = ZoneInfo(TZ)
 
+        tz = ZoneInfo(TZ)
+        res = await _run_blocking(gc.sync_pull, user_id)
         affected_ids = list(set(res.get("imported", []) + res.get("updated", [])))
         now = datetime.now(tz).timestamp()
+
         for task_id in affected_ids:
             t = await _run_blocking(_mem.get_task, task_id)
             if not t or not t.due_at:
                 continue
             if (getattr(t, "extra", None) or {}).get("all_day"):
                 continue
-            when_epoch = int(t.due_at) - 3600
+
+            when_epoch = int(t.due_at) - 3600  # за час до события
             if when_epoch <= now:
                 continue
+
             run_date = datetime.fromtimestamp(when_epoch, tz=tz)
             try:
                 scheduler.add_job(
@@ -256,14 +257,17 @@ async def run_google_pull_and_schedule(app, _mem, user_id: int, scheduler) -> No
                 logger.warning(
                     "schedule reminder failed for task_id=%s", task_id, exc_info=True
                 )
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.exception("run_google_pull_and_schedule failed")
 
 
 # ----------------------- Health ping -----------------------
 
+
 async def health_ping(app, _mem, user_id: int, scheduler) -> None:
-    job_name = "health_ping"
+    """
+    Периодический health-пинг: логируем состояние джобов.
+    """
     try:
         jobs = scheduler.get_jobs()
         info_lines = [f"💚 HEALTH [{INSTANCE_NAME}]", f"Jobs: {len(jobs)}"]
@@ -271,11 +275,12 @@ async def health_ping(app, _mem, user_id: int, scheduler) -> None:
             nxt = j.next_run_time.isoformat() if j.next_run_time else "—"
             info_lines.append(f" - {j.id} → {nxt}")
         logger.info("\n".join(info_lines))
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.warning("health_ping failed", exc_info=True)
 
 
 # ----------------------- Бэкап SQLite -----------------------
+
 
 def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -283,7 +288,9 @@ def _timestamp() -> str:
 
 def _rotate_old_backups(prefix: str, keep_days: int) -> None:
     try:
-        import os, time, glob
+        import os
+        import time
+        import glob
 
         cutoff = time.time() - keep_days * 86400
         for path in glob.glob(str(BACKUP_DIR / f"{prefix}-*.zip")):
@@ -294,26 +301,33 @@ def _rotate_old_backups(prefix: str, keep_days: int) -> None:
 
 
 async def sqlite_backup_job() -> None:
-    job_name = "sqlite_backup_job"
+    """
+    Ночной бэкап app.sqlite3 + jobs.sqlite3 в ZIP.
+    """
     try:
         import zipfile
 
         stamp = _timestamp()
         out = BACKUP_DIR / f"{INSTANCE_NAME}-{stamp}.zip"
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for src, name in [(DB_PATH, "app.sqlite3"), (JOBSTORE_DB_PATH, "jobs.sqlite3")]:
+            for src, name in [
+                (DB_PATH, "app.sqlite3"),
+                (JOBSTORE_DB_PATH, "jobs.sqlite3"),
+            ]:
                 try:
                     tmp = BACKUP_DIR / f"_tmp_{stamp}_{name}"
                     shutil.copy2(src, tmp)
                     zf.write(tmp, arcname=name)
                     tmp.unlink(missing_ok=True)
                 except Exception:
-                    logger.warning("backup copy failed: %s", name, exc_info=True)
+                    logger.warning(
+                        "backup copy failed: %s", name, exc_info=True
+                    )
 
         _rotate_old_backups(INSTANCE_NAME, BACKUP_KEEP_DAYS)
         logger.info("💾 Backup created: %s", out)
-    except Exception as e:
-        logger.exception("❌ Job '%s' failed: %s", job_name, e)
+    except Exception:
+        logger.exception("sqlite_backup_job failed")
 
 
 def _parse_hhmm(hhmm: str) -> tuple[int, int]:
@@ -325,6 +339,9 @@ def _parse_hhmm(hhmm: str) -> tuple[int, int]:
 
 
 def schedule_sqlite_backup_job(sched) -> None:
+    """
+    Регистрирует cron-задачу на ежедневный бэкап.
+    """
     hh, mm = _parse_hhmm(BACKUP_TIME)
     sched.add_job(
         sqlite_backup_job,

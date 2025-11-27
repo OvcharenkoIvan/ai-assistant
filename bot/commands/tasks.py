@@ -1,4 +1,3 @@
-# bot/commands/tasks.py
 from __future__ import annotations
 
 import logging
@@ -14,6 +13,7 @@ from telegram.ext import ContextTypes
 
 from bot.core.config import TZ
 from bot.integrations.google_calendar import GoogleCalendarClient
+from bot.commands.task_actions import build_task_actions_kb
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,12 @@ def _parse_due_at_and_flags(text: str) -> tuple[Optional[int], dict]:
     if not dt:
         return None, extra_flags
 
-    all_day_triggers = bool(re.search(r"\b(весь день|целый день|день рождения|др|birthday)\b", text, re.IGNORECASE))
-    time_explicit = bool(re.search(r"\b([01]?\d|2[0-3])[:.]\d{2}\b", text)) or bool(
+    all_day_triggers = bool(
+        re.search(r"\b(весь день|целый день|день рождения|др|birthday)\b", text, re.IGNORECASE)
+    )
+    time_explicit = bool(
+        re.search(r"\b([01]?\d|2[0-3])[:.]\d{2}\b", text)
+    ) or bool(
         re.search(r"\bв\s*([01]?\d|2[0-3])\s*час", text, re.IGNORECASE)
     )
 
@@ -77,6 +81,7 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *
     """
     /task <текст> — добавляет задачу. Пытается распознать дату/время.
     Если есть due_at и подключён Google — создаёт событие в календаре.
+    После создания показывает карточку задачи с inline-кнопками действий.
     """
     if not update.message:
         return
@@ -120,14 +125,14 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *
 
     # 2) Google Calendar (если есть due_at)
     created_in_calendar = False
+    task_obj = None
     try:
-        if due_at:
+        task_obj = await _run_blocking(_mem.get_task, task_id)
+        if due_at and task_obj:
             gc = GoogleCalendarClient(_mem)
             if gc.is_connected(user.id):
-                task_obj = await _run_blocking(_mem.get_task, task_id)
-                if task_obj:
-                    await _run_blocking(gc.create_event, user.id, task_obj)
-                    created_in_calendar = True
+                await _run_blocking(gc.create_event, user.id, task_obj)
+                created_in_calendar = True
     except Exception as e:
         logger.warning("add_task_command: failed Google event create, task_id=%s: %s", task_id, e)
 
@@ -139,6 +144,22 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *
 
     await update.message.reply_text(f"✅ Задача сохранена (id={task_id}){suffix}")
 
+    # 3) Карточка задачи с inline-кнопками
+    try:
+        if not task_obj:
+            task_obj = await _run_blocking(_mem.get_task, task_id)
+        if task_obj:
+            mark = "🕒" if task_obj.due_at else "•"
+            cal = " 📅" if getattr(task_obj, "calendar_event_id", None) else ""
+            text = (
+                f"{mark} [{task_obj.id}] {task_obj.text}{cal}\n"
+                f"Срок: {_fmt_epoch(task_obj.due_at)}"
+            )
+            kb = build_task_actions_kb(task_obj.id)
+            await update.message.reply_text(text, reply_markup=kb)
+    except Exception:
+        logger.warning("add_task_command: failed to send task card with actions", exc_info=True)
+
 
 # ---------------------------
 # /tasks — список задач
@@ -147,6 +168,7 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *
 async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
     """
     Показывает список открытых задач.
+    Для каждой задачи отправляет отдельное сообщение с inline-кнопками действий.
     """
     if not update.message:
         return
@@ -166,13 +188,17 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any
         await update.message.reply_text("📭 Нет открытых задач.")
         return
 
-    lines: List[str] = []
-    for t in items:
-        mark = "🕒" if t.due_at else "•"
-        cal = " 📅" if getattr(t, "calendar_event_id", None) else ""
-        lines.append(f"{mark} [{t.id}] {t.text}{cal}  (срок: {_fmt_epoch(t.due_at)})")
+    await update.message.reply_text("📝 Твои задачи (можно управлять кнопками ниже):")
 
-    await update.message.reply_text("📝 Твои задачи:\n" + "\n".join(lines))
+    for t in items:
+        try:
+            mark = "🕒" if t.due_at else "•"
+            cal = " 📅" if getattr(t, "calendar_event_id", None) else ""
+            text = f"{mark} [{t.id}] {t.text}{cal}\nСрок: {_fmt_epoch(t.due_at)}"
+            kb = build_task_actions_kb(t.id)
+            await update.message.reply_text(text, reply_markup=kb)
+        except Exception:
+            logger.warning("tasks: failed to send task card for id=%s", t.id, exc_info=True)
 
 
 # ---------------------------
@@ -233,7 +259,7 @@ async def reset_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _me
 async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
     """
     /complete <номер_в_списке> — отмечает задачу как выполненную (status=done)
-    И дополнительно префиксует название задачки «✅ ...», что подтянется в Google через push-синк.
+    И дополнительно префиксует название задачки «✅ ...».
     """
     if not update.message:
         return
@@ -288,3 +314,4 @@ async def complete_task(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _
         logger.warning("complete_task: failed to prefix checkmark for task_id=%s: %s", task.id, e)
 
     await update.message.reply_text(f"✅ Задача '{task.text}' отмечена как выполненная.")
+    

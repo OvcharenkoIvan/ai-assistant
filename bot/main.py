@@ -19,7 +19,7 @@ from telegram.ext import (
 from bot.memory.capture import handle_capture_callback
 from bot.memory.intent import process_intent
 from bot.commands.start_help import start, help_command
-from bot.commands.voice import voice_on, voice_off, voice_status
+from bot.commands.voice import voice_on, voice_off, voice_status, voice_persistent_keyboard
 from bot.commands import notes, tasks
 from bot.gpt.chat import chat_with_gpt
 from bot.memory.memory_loader import get_memory
@@ -28,6 +28,7 @@ OWNER_ID = CONFIG_OWNER_ID or 0
 from bot.commands.suggest_plan import suggest_plan
 from bot.commands.today import today_command
 from bot.commands.week import week_command
+from bot.commands.health import health_command
 
 
 # 🔔 Планировщик (pull-sync Google + дайджесты + бэкапы)
@@ -133,6 +134,7 @@ async def main():
         BotCommand("suggest_plan", "Предложить план дня"),
         BotCommand("today", "Задачи на сегодня"),
         BotCommand("week", "Задачи на неделю"),
+        BotCommand("health", "Проверить состояние бота"),
     ])
 
     # --- Ошибки ---
@@ -144,6 +146,8 @@ async def main():
     app.add_handler(CommandHandler("voice_on", voice_on))
     app.add_handler(CommandHandler("voice_off", voice_off))
     app.add_handler(CommandHandler("voice_status", voice_status))
+    app.add_handler(CommandHandler("keyboard", voice_persistent_keyboard))
+    app.add_handler(CommandHandler("health", partial(health_command, _mem=_mem)))
 
     # --- Notes ---
     app.add_handler(CommandHandler("note", partial(notes.note, _mem=_mem)))

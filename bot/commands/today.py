@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import List, Optional, Any
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -10,10 +11,15 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.core.config import TZ
-# используем твою единую клавиатуру действий, чтобы не расходиться по форматам
 from bot.commands.task_actions import build_task_actions_kb
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_blocking(func, *args, **kwargs):
+    """Запуск синхронной функции в thread pool (как в tasks.py)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 def _fmt_time(epoch: Optional[int]) -> str:
@@ -37,12 +43,12 @@ def _today_bounds() -> tuple[int, int]:
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _mem: Any) -> None:
     """
-    /today — показать задачи на сегодня (status='open' и дедлайн попадает в текущие сутки).
-    Под каждой задачей одна и та же универсальная клавиатура из task_actions:
-      - 🔁 На завтра (task_action:<id>:move_tomorrow)
-      - 🕒 Другое время (task_action:<id>:reschedule)
-      - ✅ Выполнено (task_action:<id>:mark_done)
-      - ❌ Удалить (task_action:<id>:delete)
+    /today — показать задачи на сегодня (status='open' и дедлайн в текущие сутки).
+    Под каждой задачей — универсальная клавиатура из task_actions:
+      - 🔁 На завтра
+      - 🕒 Другое время
+      - ✅ Выполнено
+      - ❌ Удалить
     """
     if not update.message:
         return
@@ -55,7 +61,8 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _
     start_ts, end_ts = _today_bounds()
 
     try:
-        tasks: List = _mem.list_upcoming_tasks(
+        tasks: List = await _run_blocking(
+            _mem.list_upcoming_tasks,
             user_id=user.id,
             due_from=start_ts,
             due_to=end_ts,
@@ -77,7 +84,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _
         f"(используй кнопки под каждой карточкой)"
     )
 
-    # карточки с кнопками из task_actions.build_task_actions_kb
+    # карточки с кнопками
     for t in tasks:
         task_id = getattr(t, "id", None)
         if task_id is None:

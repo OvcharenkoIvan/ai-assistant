@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,6 +14,12 @@ from bot.core.config import TZ
 from bot.commands.task_actions import build_task_actions_kb
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_blocking(func, *args, **kwargs):
+    """Запуск синхронной функции в thread pool (как в tasks.py)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 
 def _fmt_date(epoch: int) -> str:
@@ -50,7 +57,8 @@ async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE, *, _m
     end_ts = int((now + timedelta(days=7)).timestamp())
 
     try:
-        tasks: List = _mem.list_upcoming_tasks(
+        tasks: List = await _run_blocking(
+            _mem.list_upcoming_tasks,
             user_id=user.id,
             due_from=start_ts,
             due_to=end_ts,
